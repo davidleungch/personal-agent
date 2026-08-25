@@ -8,7 +8,13 @@ const databaseUrlSchema = z.string().min(1).refine((value) => {
   }
 }, "DATABASE_URL must be a PostgreSQL URL");
 
+const nonnegativeIntegerSchema = z.coerce.number().int().nonnegative();
+const positiveIntegerSchema = z.coerce.number().int().positive();
+
 const environmentSchema = z.object({
+  AGENT_MAX_ESCALATION_DEPTH: nonnegativeIntegerSchema.max(2).default(2),
+  AGENT_MAX_MODEL_INVOCATIONS: positiveIntegerSchema.default(12),
+  AGENT_MAX_REASONING_RETRIES: nonnegativeIntegerSchema.default(1),
   BROWSER_PROFILE_DIR: z.string().min(1).default("/var/lib/personal-agent/browser-profile"),
   DATABASE_URL: databaseUrlSchema,
   GOOGLE_CLIENT_ID_FILE: z.string().min(1).optional(),
@@ -36,6 +42,11 @@ export function parseWorkerConfiguration(environment: Environment) {
   );
 
   return {
+    agentLimits: {
+      maxEscalationDepth: configuration.AGENT_MAX_ESCALATION_DEPTH,
+      maxModelInvocations: configuration.AGENT_MAX_MODEL_INVOCATIONS,
+      maxReasoningRetries: configuration.AGENT_MAX_REASONING_RETRIES
+    },
     browserProfileDirectory: configuration.BROWSER_PROFILE_DIR,
     credentialFiles: {
       googleClientId: configuration.GOOGLE_CLIENT_ID_FILE,

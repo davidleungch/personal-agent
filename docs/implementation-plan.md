@@ -7,10 +7,10 @@ Autonomous Agent Platform. [`docs/design.md`](design.md) remains the product and
 architecture source of truth. If this plan conflicts with the design, the design
 wins unless the user approves an explicit architecture decision.
 
-Milestones 1–4 are COMPLETE and have been reviewed. Their architectural
+Milestones 1–5 are COMPLETE and have been reviewed. Their architectural
 contracts below remain the historical and operational source of truth.
-Milestone 5 — Agent Runtime is NEXT / NOT STARTED and is the only currently
-authorized implementation milestone. Milestones 6 and 7 are NOT STARTED.
+Milestone 6 — Product Surfaces is NEXT / NOT STARTED and is the only currently
+authorized implementation milestone. Milestone 7 is NOT STARTED.
 
 ## Repository structure
 
@@ -323,9 +323,9 @@ named volumes. Verify `linux/amd64` and `linux/arm64` image builds.
    prevention, leases, recovery, and state transitions.
 4. **Tool gateway and adapters — COMPLETE** — registry, capabilities, audit records,
    idempotency, unknown verification, Browser, Gmail, and Calendar boundaries.
-5. **Agent runtime — NEXT / NOT STARTED** — fresh Agents SDK runs, structured output, semantic profile
+5. **Agent runtime — COMPLETE** — fresh Agents SDK runs, structured output, semantic profile
    routing, durable context compilation, and deterministic escalation.
-6. **Product surfaces — NOT STARTED** — command creation, automation review/editing, run and
+6. **Product surfaces — NEXT / NOT STARTED** — command creation, automation review/editing, run and
    activity views, evidence, and human resume.
 7. **Phase 1 acceptance — NOT STARTED** — complete fixture workflow, optional live smoke tests,
    restart/resume verification, clean-checkout setup, and all 25 design criteria.
@@ -355,15 +355,17 @@ and clean artifacts in `finally`-style teardown. Calendar event deletion belongs
 only to this test harness. An unverified outcome is reported as `unknown` with
 manual cleanup instructions.
 
-## Milestone 5 handoff
+## Milestone 6 handoff
 
-Milestones 1–4 are complete and reviewed. The contracts above for those milestones
+Milestones 1–5 are complete and reviewed. The contracts above for those milestones
 remain authoritative for their implemented behavior and operational guarantees.
-Milestone 5 is not started and is the only currently authorized implementation
+Milestone 6 is not started and is the only currently authorized implementation
 milestone. This documentation update does not begin its implementation.
 
 The current handoff instruction is:
 
-> Implement Phase 1 Milestone 5 from `docs/implementation-plan.md`: the Agent
-> Runtime only. Preserve the completed Milestones 1–4 contracts, run every
-> applicable quality gate, and stop for review before beginning Milestone 6.
+> Implement Phase 1 Milestone 6 from `docs/implementation-plan.md`: Product
+> Surfaces only. Add the validated database-backed command, automation,
+> run/activity, evidence, and human-resume HTTP/UI boundaries required by Phase 1.
+> Preserve the completed Milestones 1–5 contracts, run every applicable quality
+> gate, and stop for review before beginning Milestone 7.

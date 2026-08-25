@@ -127,6 +127,11 @@ describe("configuration", () => {
 
   it("keeps integrations unavailable without credentials and applies model defaults", () => {
     expect(parseWorkerConfiguration({ DATABASE_URL: databaseUrl })).toMatchObject({
+      agentLimits: {
+        maxEscalationDepth: 2,
+        maxModelInvocations: 12,
+        maxReasoningRetries: 1
+      },
       integrations: { google: "unavailable", openai: "unavailable" },
       models: {
         balanced: "gpt-5.6-terra",
@@ -134,6 +139,26 @@ describe("configuration", () => {
         reasoning: "gpt-5.6-sol"
       }
     });
+  });
+
+  it("validates configured agent-runtime limits", () => {
+    expect(
+      parseWorkerConfiguration({
+        AGENT_MAX_ESCALATION_DEPTH: "0",
+        AGENT_MAX_MODEL_INVOCATIONS: "4",
+        AGENT_MAX_REASONING_RETRIES: "3",
+        DATABASE_URL: databaseUrl
+      }).agentLimits
+    ).toEqual({ maxEscalationDepth: 0, maxModelInvocations: 4, maxReasoningRetries: 3 });
+    expect(() =>
+      parseWorkerConfiguration({ AGENT_MAX_MODEL_INVOCATIONS: "0", DATABASE_URL: databaseUrl })
+    ).toThrow();
+    expect(() =>
+      parseWorkerConfiguration({ AGENT_MAX_REASONING_RETRIES: "1.5", DATABASE_URL: databaseUrl })
+    ).toThrow();
+    expect(() =>
+      parseWorkerConfiguration({ AGENT_MAX_ESCALATION_DEPTH: "3", DATABASE_URL: databaseUrl })
+    ).toThrow();
   });
 
   it("requires all Google files and independently derives OpenAI availability", () => {

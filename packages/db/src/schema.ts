@@ -191,6 +191,7 @@ export const modelInvocations = pgTable(
     runId: uuid("run_id")
       .notNull()
       .references(() => automationRuns.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    role: text().notNull(),
     modelProfile: text("model_profile").notNull(),
     executionModelId: text("execution_model_id").notNull(),
     status: text().notNull(),
@@ -202,6 +203,10 @@ export const modelInvocations = pgTable(
     completedAt: timestampColumn("completed_at")
   },
   (table) => [
+    check(
+      "model_invocations_role_check",
+      sql`${table.role} in ('intent_router', 'extractor', 'general', 'planner', 'verification')`
+    ),
     check(
       "model_invocations_model_profile_check",
       sql`${table.modelProfile} in ('fast', 'balanced', 'reasoning')`

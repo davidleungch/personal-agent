@@ -342,6 +342,7 @@ describe("consequential idempotency and verification", () => {
     const def = definition({ execute: async () => ({ data: { value: "ok" }, retryable: false, status: "success" }) });
     const tool = gateway(run.id, def);
     expect(tool.instance.resolveDefinitions("browser-read", { browser: "available", google: "available" }).map((item) => item.name)).toEqual(["browser.open"]);
+    expect(tool.instance.resolveDefinitions("browser-read", { browser: "unavailable", google: "available" })).toEqual([]);
     expect(tool.instance.resolveDefinitions("none", { browser: "available", google: "available" })).toEqual([]);
     expect(new Set((await database.select().from(automations)).map((item) => item.toolPolicy))).not.toContain("calendar-delete");
   });

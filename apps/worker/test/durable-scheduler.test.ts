@@ -1,18 +1,27 @@
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   automationRuns,
   automations,
   createDatabase,
   createRepositories,
   migrateDatabase,
+  modelInvocations,
   runEvents,
   idempotencyRecords,
   type Database
 } from "@personal-agent/db";
 import { asc, eq } from "drizzle-orm";
+import { parseWorkerConfiguration } from "@personal-agent/shared";
+import { PlaywrightBrowserOperations } from "@personal-agent/tools";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDurablePolling,
+  createAgentRuntime,
+  createDatabaseAgentRuntimePersistence,
+  createConfiguredAgentExecutor,
   createRunState,
   InvalidRunTransitionError,
   RunLeaseError,
@@ -411,6 +420,91 @@ describe("durable claims, leases, checkpoints, and recovery", () => {
   });
 });
 
+describe("durable Agent Runtime persistence", () => {
+  const now = new Date("2026-08-25T10:00:00.000Z");
+  const gateway = {
+    execute: vi.fn(async () => ({ retryable: false, status: "failed" as const })),
+    resolveDefinitions: () => []
+  };
+
+  it("persists safe model audit metadata without prompts or full responses", async () => {
+    const automation = await createAutomation({ nextRunAt: new Date("2026-08-26T00:00:00.000Z"), schedule: "0 0 * * *" });
+    const run = await createRun({ automationId: automation.id });
+    await createRunState(database).claimRun("agent-worker", now, 60_000);
+    await expect(
+      createDatabaseAgentRuntimePersistence(database).renewLease(run.id, "agent-worker", now)
+    ).resolves.toBe(true);
+    const runtime = createAgentRuntime({
+      clock: () => new Date("2026-08-25T10:00:10.000Z"),
+      gateway,
+      integrations: { browser: "unavailable", google: "unavailable" },
+      models: { balanced: "configured-balanced", fast: "configured-fast", reasoning: "configured-reasoning" },
+      persistence: createDatabaseAgentRuntimePersistence(database),
+      transport: { invoke: async () => ({ output: { data: null, kind: "complete", summary: "private full response" }, usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } }) }
+    });
+
+    await expect(runtime.execute(run.id, "agent-worker")).resolves.toBe("succeeded");
+    const [audit] = await database.select().from(modelInvocations).where(eq(modelInvocations.runId, run.id));
+    expect(audit).toMatchObject({
+      executionModelId: "configured-balanced",
+      modelProfile: "balanced",
+      role: "general",
+      schemaOutcome: "valid",
+      status: "succeeded",
+      summary: "decision_complete",
+      usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 }
+    });
+    expect(JSON.stringify(audit)).not.toContain("private full response");
+    expect(Object.keys(audit!)).not.toContain("prompt");
+  });
+
+  it("reconstructs a fresh next step from persisted checkpoint, events, evidence metadata, and interrupted audit", async () => {
+    const repositories = createRepositories(database);
+    const automation = await createAutomation({ name: "Restart target", nextRunAt: new Date("2026-08-26T00:00:00.000Z"), schedule: "0 0 * * *" });
+    const run = await createRun({ automationId: automation.id });
+    const unrelatedAutomation = await createAutomation({ name: "Unrelated", nextRunAt: new Date("2026-08-26T01:00:00.000Z"), schedule: "0 1 * * *" });
+    const unrelatedRun = await createRun({ automationId: unrelatedAutomation.id, status: "succeeded" });
+    await repositories.appendRunEvent({ eventType: "unrelated_secret_history", runId: unrelatedRun.id });
+    await repositories.appendRunEvent({ eventType: "durable_step_ready", payload: { step: 2 }, runId: run.id });
+    const readCall = await repositories.recordToolCall({ attempt: 1, runId: run.id, sideEffectClass: "read_only", status: "success", tool: "browser.read" });
+    await repositories.addEvidence({ evidenceType: "confirmation_metadata", payload: { rawText: "external full body must stay out" }, runId: run.id, toolCallId: readCall.id });
+    await repositories.addEvidence({ evidenceType: "run_metadata", payload: { safe: true }, runId: run.id });
+    const runState = createRunState(database);
+    await runState.claimRun("worker-before-restart", now, 60_000);
+    const persistenceBefore = createDatabaseAgentRuntimePersistence(database);
+    await persistenceBefore.saveCheckpoint({ checkpoint: { cursor: "durable-step-2", observation: { text: "bounded external note", trust: "untrusted_external" } }, now, runId: run.id, workerId: "worker-before-restart", workflowPhase: "step_2" });
+    await persistenceBefore.beginInvocation({ executionModelId: "configured-balanced", modelProfile: "balanced", role: "general", runId: run.id, startedAt: now });
+    await expect(persistenceBefore.load(run.id)).resolves.toMatchObject({ invocations: [{ status: "started" }] });
+    await expect(persistenceBefore.load("00000000-0000-4000-8000-000000000099")).resolves.toBeUndefined();
+    await runState.recoverExpiredLeases(new Date("2026-08-25T10:01:00.000Z"));
+    await createRunState(database).claimRun("worker-after-restart", new Date("2026-08-25T10:01:01.000Z"), 60_000);
+
+    const contexts: string[] = [];
+    const runtimeAfter = createAgentRuntime({
+      clock: () => new Date("2026-08-25T10:01:10.000Z"),
+      gateway,
+      integrations: { browser: "unavailable", google: "unavailable" },
+      models: { balanced: "configured-balanced", fast: "configured-fast", reasoning: "configured-reasoning" },
+      persistence: createDatabaseAgentRuntimePersistence(database),
+      transport: { invoke: async (request) => { contexts.push(request.context); return { output: { data: null, kind: "complete", summary: "resumed" }, usage: {} }; } }
+    });
+    await expect(runtimeAfter.execute(run.id, "worker-after-restart")).resolves.toBe("succeeded");
+
+    const compiled = contexts[0]!;
+    expect(compiled).toContain("durable-step-2");
+    expect(compiled).toContain("durable_step_ready");
+    expect(compiled).toContain("confirmation_metadata");
+    expect(compiled).toContain("untrusted_external");
+    expect(compiled).not.toContain("unrelated_secret_history");
+    expect(compiled).not.toContain("external full body must stay out");
+    const audits = await database.select().from(modelInvocations).where(eq(modelInvocations.runId, run.id));
+    expect(audits.map((audit) => [audit.status, audit.summary])).toEqual([
+      ["failed", "model_execution_interrupted"],
+      ["succeeded", "decision_complete"]
+    ]);
+  });
+});
+
 describe("lifecycle state machine", () => {
   const now = new Date("2026-08-25T10:00:00.000Z");
 
@@ -530,16 +624,19 @@ describe("lifecycle state machine", () => {
 });
 
 describe("worker polling", () => {
+  const pollingNow = new Date("2026-08-25T10:00:00.000Z");
   it("uses a 15-second default and avoids overlapping local wake-ups", async () => {
     expect(SCHEDULER_POLL_INTERVAL_MS).toBe(15_000);
     const clock = vi.fn(() => new Date("2026-08-25T10:00:00.000Z"));
-    const polling = createDurablePolling(database, { clock, pollIntervalMs: 15_000 });
+    const executeRun = vi.fn(async () => undefined);
+    const polling = createDurablePolling(database, { clock, executeRun, pollIntervalMs: 15_000 });
     polling.start();
     polling.start();
     await polling.tick();
     polling.stop();
     polling.stop();
     expect(clock).toHaveBeenCalled();
+    await vi.waitFor(() => expect(executeRun).toHaveBeenCalled());
   });
 
   it("validates polling intervals", () => {
@@ -560,12 +657,28 @@ describe("worker polling", () => {
   });
 
   it("starts against PostgreSQL and reports configured integration availability", async () => {
+    const close = vi.fn(async () => undefined);
     const worker = await startWorker(0, {
       DATABASE_URL: databaseUrl,
       GOOGLE_CLIENT_ID_FILE: "/id",
       GOOGLE_CLIENT_SECRET_FILE: "/secret",
       GOOGLE_REFRESH_TOKEN_FILE: "/refresh",
       OPENAI_API_KEY_FILE: "/openai"
+    }, {
+      browser: {
+        click: async () => undefined,
+        close,
+        currentUrl: () => "https://fixture.test",
+        navigationClick: async () => undefined,
+        open: async (url) => ({ title: "fixture", url }),
+        read: async () => "fixture",
+        select: async () => undefined,
+        type: async () => undefined,
+        upload: async () => undefined,
+        waitFor: async () => undefined
+      },
+      modelTransportFactory: () => ({ invoke: async () => ({ output: { data: null, kind: "complete", summary: "done" }, usage: {} }) }),
+      readCredential: async (path) => `fixture-${path}`
     });
     await once(worker.server, "listening");
     const address = worker.server.address();
@@ -577,5 +690,77 @@ describe("worker polling", () => {
       integrations: { google: "available", openai: "available" }
     });
     await worker.stop();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("loads configured credential files, uses default model construction, and rejects empty files", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "personal-agent-worker-credentials-"));
+    const openaiPath = join(directory, "openai");
+    const emptyPath = join(directory, "empty");
+    await writeFile(openaiPath, "fake-openai-key\n");
+    await writeFile(emptyPath, "  \n");
+    const close = vi.fn(async () => undefined);
+    const browser = {
+      click: async () => undefined, close, currentUrl: () => "https://fixture.test",
+      navigationClick: async () => undefined, open: async (url: string) => ({ title: "fixture", url }),
+      read: async () => "fixture", select: async () => undefined, type: async () => undefined,
+      upload: async () => undefined, waitFor: async () => undefined
+    };
+    try {
+      const configured = parseWorkerConfiguration({ DATABASE_URL: databaseUrl, OPENAI_API_KEY_FILE: openaiPath });
+      const executor = await createConfiguredAgentExecutor(database, configured, { browser, clock: () => pollingNow, workerId: "configured-worker" });
+      await executor.close();
+      expect(close).toHaveBeenCalledOnce();
+
+      const empty = parseWorkerConfiguration({ DATABASE_URL: databaseUrl, OPENAI_API_KEY_FILE: emptyPath });
+      await expect(createConfiguredAgentExecutor(database, empty, { browser })).rejects.toThrow("credential file is empty");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("launches the default browser boundary and keeps absent integrations unavailable", async () => {
+    const close = vi.fn(async () => undefined);
+    const launchedBrowser = {
+      click: async () => undefined, close, currentUrl: () => "about:blank",
+      navigationClick: async () => undefined, open: async (url: string) => ({ title: "fixture", url }),
+      read: async () => "fixture", select: async () => undefined, type: async () => undefined,
+      upload: async () => undefined, waitFor: async () => undefined
+    };
+    const launch = vi.spyOn(PlaywrightBrowserOperations, "launch").mockResolvedValue(launchedBrowser as never);
+    const directory = await mkdtemp(join(tmpdir(), "personal-agent-worker-browser-"));
+    try {
+      const configured = parseWorkerConfiguration({ BROWSER_PROFILE_DIR: directory, DATABASE_URL: databaseUrl });
+      const executor = await createConfiguredAgentExecutor(database, configured);
+      await executor.executeRun(pollingNow);
+      await executor.close();
+      expect(launch).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      launch.mockRestore();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("claims and executes one configured model-backed run", async () => {
+    const automation = await createAutomation({ nextRunAt: new Date("2026-08-26T00:00:00.000Z"), schedule: "0 0 * * *" });
+    const run = await createRun({ automationId: automation.id });
+    const browser = {
+      click: async () => undefined, close: async () => undefined, currentUrl: () => "https://fixture.test",
+      navigationClick: async () => undefined, open: async (url: string) => ({ title: "fixture", url }),
+      read: async () => "fixture", select: async () => undefined, type: async () => undefined,
+      upload: async () => undefined, waitFor: async () => undefined
+    };
+    const configured = parseWorkerConfiguration({ DATABASE_URL: databaseUrl, OPENAI_API_KEY_FILE: "/openai" });
+    const executor = await createConfiguredAgentExecutor(database, configured, {
+      browser,
+      clock: () => pollingNow,
+      modelTransportFactory: () => ({ invoke: async () => ({ output: { data: null, kind: "complete", summary: "done" }, usage: {} }) }),
+      readCredential: async () => "fake-openai-key",
+      workerId: "executor-worker"
+    });
+    await executor.executeRun(pollingNow);
+    await expect(database.select().from(automationRuns).where(eq(automationRuns.id, run.id))).resolves.toMatchObject([{ status: "succeeded" }]);
+    await executor.close();
   });
 });

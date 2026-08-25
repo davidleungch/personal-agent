@@ -207,6 +207,7 @@ describe("repositories", () => {
     const startedInvocation = await repositories.recordModelInvocation({
       executionModelId: "provider-runtime-id",
       modelProfile: "fast",
+      role: "general",
       runId: run.id,
       schemaOutcome: "not_requested",
       status: "started"
@@ -218,6 +219,7 @@ describe("repositories", () => {
       executionModelId: "provider-runtime-id",
       latencyMs: 25,
       modelProfile: "fast",
+      role: "general",
       runId: run.id,
       schemaOutcome: "valid",
       startedAt: new Date("2026-08-26T00:00:01.000Z"),
