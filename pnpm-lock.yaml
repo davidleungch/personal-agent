@@ -130,9 +130,15 @@ importers:
 
   packages/tools:
     dependencies:
+      '@personal-agent/db':
+        specifier: workspace:*
+        version: link:../db
       '@personal-agent/shared':
         specifier: workspace:*
         version: link:../shared
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
       googleapis:
         specifier: 176.0.0
         version: 176.0.0(supports-color@7.2.0)

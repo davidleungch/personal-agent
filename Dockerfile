@@ -5,6 +5,7 @@ FROM node:22.18.0-bookworm-slim AS workspace
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 RUN corepack enable && corepack prepare pnpm@11.23.0 --activate
 
@@ -21,6 +22,13 @@ COPY --chown=node:node packages/shared/package.json packages/shared/package.json
 COPY --chown=node:node packages/tools/package.json packages/tools/package.json
 
 RUN pnpm install --frozen-lockfile
+
+USER root
+RUN pnpm --filter @personal-agent/tools exec playwright install --with-deps chromium \
+    && mkdir -p /var/lib/personal-agent/browser-profile \
+    && chown -R node:node /ms-playwright /var/lib/personal-agent/browser-profile \
+    && chmod 700 /var/lib/personal-agent/browser-profile
+USER node
 
 COPY --chown=node:node . .
 RUN pnpm build

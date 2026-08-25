@@ -72,6 +72,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      BROWSER_PROFILE_DIR: /var/lib/personal-agent/browser-profile
       DATABASE_URL: postgresql://personal_agent:personal_agent_local@postgres:5432/personal_agent
     healthcheck:
       test:
@@ -86,6 +87,9 @@ services:
       retries: 10
     init: true
     restart: unless-stopped
+    volumes:
+      - browser-profile:/var/lib/personal-agent/browser-profile
 
 volumes:
+  browser-profile:
   postgres-data:

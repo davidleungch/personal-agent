@@ -9,6 +9,7 @@ const databaseUrlSchema = z.string().min(1).refine((value) => {
 }, "DATABASE_URL must be a PostgreSQL URL");
 
 const environmentSchema = z.object({
+  BROWSER_PROFILE_DIR: z.string().min(1).default("/var/lib/personal-agent/browser-profile"),
   DATABASE_URL: databaseUrlSchema,
   GOOGLE_CLIENT_ID_FILE: z.string().min(1).optional(),
   GOOGLE_CLIENT_SECRET_FILE: z.string().min(1).optional(),
@@ -35,6 +36,7 @@ export function parseWorkerConfiguration(environment: Environment) {
   );
 
   return {
+    browserProfileDirectory: configuration.BROWSER_PROFILE_DIR,
     credentialFiles: {
       googleClientId: configuration.GOOGLE_CLIENT_ID_FILE,
       googleClientSecret: configuration.GOOGLE_CLIENT_SECRET_FILE,

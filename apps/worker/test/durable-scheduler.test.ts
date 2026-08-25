@@ -6,6 +6,7 @@ import {
   createRepositories,
   migrateDatabase,
   runEvents,
+  idempotencyRecords,
   type Database
 } from "@personal-agent/db";
 import { asc, eq } from "drizzle-orm";
@@ -350,23 +351,25 @@ describe("durable claims, leases, checkpoints, and recovery", () => {
     await state.claimRun("worker", now, 60_000);
     await state.saveCheckpoint({
       checkpoint: {
-        pendingConsequentialOperation: { idempotencyKey: "stable-key", outcome: "pending" }
+        pendingConsequentialOperation: { idempotencyKey: "stable-key", outcome: "pending", tool: "browser.submit" }
       },
       now: new Date("2026-08-25T10:00:10.000Z"),
       runId: run.id,
       workerId: "worker",
       workflowPhase: "submitted"
     });
+    await createRepositories(database).createIdempotencyRecord({ key: "stable-key", runId: run.id, scope: "browser.submit", state: "reserved" });
     const [recovered] = await state.recoverExpiredLeases(
       new Date("2026-08-25T10:01:00.000Z")
     );
 
     expect(recovered).toMatchObject({
       checkpoint: {
-        pendingConsequentialOperation: { idempotencyKey: "stable-key", outcome: "unknown" }
+        pendingConsequentialOperation: { idempotencyKey: "stable-key", outcome: "unknown", tool: "browser.submit" }
       },
       status: "verifying"
     });
+    await expect(database.select().from(idempotencyRecords)).resolves.toMatchObject([{ state: "unknown" }]);
     await expect(
       createRunState(database).claimRun(
         "verifier",
@@ -374,6 +377,14 @@ describe("durable claims, leases, checkpoints, and recovery", () => {
         60_000
       )
     ).resolves.toMatchObject({ status: "verifying" });
+  });
+
+  it("recovers malformed legacy consequential checkpoints without inventing idempotency state", async () => {
+    const { run } = await fixture();
+    const state = createRunState(database);
+    await state.claimRun("legacy-worker", now, 60_000);
+    await state.saveCheckpoint({ checkpoint: { pendingConsequentialOperation: { idempotencyKey: "key", outcome: "pending", tool: 1 } }, now, runId: run.id, workerId: "legacy-worker", workflowPhase: "legacy" });
+    await expect(state.recoverExpiredLeases(new Date("2026-08-25T10:01:00.000Z"))).resolves.toMatchObject([{ status: "verifying" }]);
   });
 
   it("rejects checkpoint writes without the live owning lease", async () => {

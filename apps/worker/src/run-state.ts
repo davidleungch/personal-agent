@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { automationRuns, runEvents, type Database } from "@personal-agent/db";
+import { automationRuns, idempotencyRecords, runEvents, type Database } from "@personal-agent/db";
 import {
   automationRunStatusSchema,
   createSecretFreeJsonSchema,
@@ -299,6 +299,21 @@ export function createRunState(database: Database, knownSecrets: readonly string
             }
           : run.checkpoint;
         const status = unknown ? "verifying" : run.status;
+        if (unknown) {
+          const operation = run.checkpoint.pendingConsequentialOperation as JsonObject;
+          if (typeof operation.idempotencyKey === "string" && typeof operation.tool === "string") {
+            await transaction
+              .update(idempotencyRecords)
+              .set({ state: "unknown", updatedAt: now })
+              .where(
+                and(
+                  eq(idempotencyRecords.scope, operation.tool),
+                  eq(idempotencyRecords.key, operation.idempotencyKey),
+                  eq(idempotencyRecords.state, "reserved")
+                )
+              );
+          }
+        }
         const [updated] = await transaction
           .update(automationRuns)
           .set({
