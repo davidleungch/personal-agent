@@ -1,9 +1,9 @@
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { startWorker } from "../src/index";
+import { createHealthServer } from "../src/index";
 
-const servers: ReturnType<typeof startWorker>[] = [];
+const servers: ReturnType<typeof createHealthServer>[] = [];
 
 afterEach(async () => {
   await Promise.all(
@@ -24,8 +24,9 @@ afterEach(async () => {
 });
 
 async function startTestWorker(): Promise<string> {
-  const server = startWorker(0);
+  const server = createHealthServer();
   servers.push(server);
+  server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
   return `http://127.0.0.1:${address.port}`;

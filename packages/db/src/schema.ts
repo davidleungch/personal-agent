@@ -85,7 +85,8 @@ export const automations = pgTable(
       "automations_completion_mode_check",
       sql`${table.completionMode} in ('continue', 'stop_after_success')`
     ),
-    check("automations_version_check", sql`${table.version} > 0`)
+    check("automations_version_check", sql`${table.version} > 0`),
+    index("automations_due_idx").on(table.enabled, table.nextRunAt)
   ]
 );
 
@@ -150,6 +151,9 @@ export const automationRuns = pgTable(
         sql`${table.status} in ('queued', 'running', 'verifying', 'retry_wait', 'needs_human')`
       ),
     index("automation_runs_claim_idx").on(table.status, table.availableAt),
+    index("automation_runs_lease_expiry_idx")
+      .on(table.leaseExpiresAt)
+      .where(sql`${table.leaseExpiresAt} is not null`),
     unique("automation_runs_id_automation_id_unique").on(table.id, table.automationId)
   ]
 );

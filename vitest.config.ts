@@ -14,6 +14,7 @@ export default defineConfig({
       }
     },
     environment: "node",
+    fileParallelism: false,
     include: ["apps/*/test/**/*.test.{ts,tsx}", "packages/*/test/**/*.test.{ts,tsx}"]
   }
 });

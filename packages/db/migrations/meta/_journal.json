@@ -15,6 +15,13 @@
       "when": 1787643869356,
       "tag": "0001_organic_sir_ram",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787647172607,
+      "tag": "0002_fine_rick_jones",
+      "breakpoints": true
     }
   ]
 }
