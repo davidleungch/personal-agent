@@ -21,8 +21,12 @@ services:
       context: .
       target: app
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://personal_agent:personal_agent_local@postgres:5432/personal_agent
     healthcheck:
       test:
         [
@@ -39,13 +43,36 @@ services:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
 
+  migrate:
+    build:
+      context: .
+      target: workspace
+    command:
+      [
+        "pnpm",
+        "--filter",
+        "@personal-agent/db",
+        "migrate"
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://personal_agent:personal_agent_local@postgres:5432/personal_agent
+    init: true
+    restart: "no"
+
   worker:
     build:
       context: .
       target: worker
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://personal_agent:personal_agent_local@postgres:5432/personal_agent
     healthcheck:
       test:
         [

@@ -11,6 +11,22 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    env:
+      TEST_DATABASE_URL: postgresql://personal_agent:personal_agent_test@127.0.0.1:5432/personal_agent_test
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: personal_agent_test
+          POSTGRES_PASSWORD: personal_agent_test
+          POSTGRES_USER: personal_agent
+        options: >-
+          --health-cmd "pg_isready -U personal_agent -d personal_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
