@@ -7,8 +7,10 @@ Autonomous Agent Platform. [`docs/design.md`](design.md) remains the product and
 architecture source of truth. If this plan conflicts with the design, the design
 wins unless the user approves an explicit architecture decision.
 
-Only Milestone 1 is implemented by the repository bootstrap. Milestones 2–7 are
-the contract for later work and must not be started without explicit approval.
+Milestones 1–4 are COMPLETE and have been reviewed. Their architectural
+contracts below remain the historical and operational source of truth.
+Milestone 5 — Agent Runtime is NEXT / NOT STARTED and is the only currently
+authorized implementation milestone. Milestones 6 and 7 are NOT STARTED.
 
 ## Repository structure
 
@@ -93,7 +95,7 @@ capabilities are omitted, and requests requiring them return a structured
 
 ## Database schema
 
-Milestone 2 will add checked-in Drizzle migrations. IDs are application-generated
+Milestone 2 added checked-in Drizzle migrations. IDs are application-generated
 UUIDs; canonical timestamps use PostgreSQL `timestamptz`; JSON is accepted only
 after Zod validation and must be secret-free. Historical records use restrictive
 foreign keys rather than cascading deletion.
@@ -313,19 +315,19 @@ named volumes. Verify `linux/amd64` and `linux/arm64` image builds.
 
 ## Milestones
 
-1. **Bootstrap** — this document, root agent policy, minimal repository, CI,
+1. **Bootstrap — COMPLETE** — this document, root agent policy, minimal repository, CI,
    credential-free Compose startup, and quality-gate validation.
-2. **Database foundation** — schema, checked-in migrations, repositories,
+2. **Database foundation — COMPLETE** — schema, checked-in migrations, repositories,
    configuration, redaction, and clean-database tests.
-3. **Durable scheduler** — due-run transactions, catch-up, deduplication, overlap
+3. **Durable scheduler — COMPLETE** — due-run transactions, catch-up, deduplication, overlap
    prevention, leases, recovery, and state transitions.
-4. **Tool gateway and adapters** — registry, capabilities, audit records,
+4. **Tool gateway and adapters — COMPLETE** — registry, capabilities, audit records,
    idempotency, unknown verification, Browser, Gmail, and Calendar boundaries.
-5. **Agent runtime** — fresh Agents SDK runs, structured output, semantic profile
+5. **Agent runtime — NEXT / NOT STARTED** — fresh Agents SDK runs, structured output, semantic profile
    routing, durable context compilation, and deterministic escalation.
-6. **Product surfaces** — command creation, automation review/editing, run and
+6. **Product surfaces — NOT STARTED** — command creation, automation review/editing, run and
    activity views, evidence, and human resume.
-7. **Phase 1 acceptance** — complete fixture workflow, optional live smoke tests,
+7. **Phase 1 acceptance — NOT STARTED** — complete fixture workflow, optional live smoke tests,
    restart/resume verification, clean-checkout setup, and all 25 design criteria.
 
 ## Testing and coverage
@@ -353,14 +355,15 @@ and clean artifacts in `finally`-style teardown. Calendar event deletion belongs
 only to this test harness. An unverified outcome is reported as `unknown` with
 manual cleanup instructions.
 
-## Milestone 1 completion and handoff
+## Milestone 5 handoff
 
-Milestone 1 is complete when install, lint, typecheck, tests, exact coverage,
-build, Docker configuration/build, and credential-free Compose health checks pass
-and no Milestone 2+ behavior exists.
+Milestones 1–4 are complete and reviewed. The contracts above for those milestones
+remain authoritative for their implemented behavior and operational guarantees.
+Milestone 5 is not started and is the only currently authorized implementation
+milestone. This documentation update does not begin its implementation.
 
-The next recommended instruction is:
+The current handoff instruction is:
 
-> Implement Phase 1 Milestone 2 from `docs/implementation-plan.md`: the database
-> foundation and durable schema only. Run every applicable quality gate and stop
-> for review before beginning Milestone 3.
+> Implement Phase 1 Milestone 5 from `docs/implementation-plan.md`: the Agent
+> Runtime only. Preserve the completed Milestones 1–4 contracts, run every
+> applicable quality gate, and stop for review before beginning Milestone 6.
