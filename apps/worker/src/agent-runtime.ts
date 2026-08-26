@@ -35,7 +35,7 @@ import {
 } from "@personal-agent/tools";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { createRunState } from "./run-state.js";
+import { createRunState, RunLeaseError } from "./run-state.js";
 
 type RuntimeStatus =
   | "queued"
@@ -122,6 +122,7 @@ export type RuntimeToolGateway = Readonly<{
 
 export type AgentRuntimeLimits = Readonly<{
   contextCharacters: number;
+  leaseHeartbeatMs: number;
   malformedBackoffMs: number;
   maxEscalationDepth: number;
   maxModelInvocations: number;
@@ -132,6 +133,7 @@ export type AgentRuntimeLimits = Readonly<{
 
 export const defaultAgentRuntimeLimits: AgentRuntimeLimits = Object.freeze({
   contextCharacters: 24_000,
+  leaseHeartbeatMs: 20_000,
   malformedBackoffMs: 100,
   maxEscalationDepth: 2,
   maxModelInvocations: 12,
@@ -162,7 +164,11 @@ function validateLimits(limits: AgentRuntimeLimits): AgentRuntimeLimits {
   if (entries.some(([, value]) => !Number.isInteger(value) || value < 0)) {
     throw new Error("Agent runtime limits must be non-negative integers");
   }
-  if (limits.contextCharacters < 2_000 || limits.maxModelInvocations < 1) {
+  if (
+    limits.contextCharacters < 2_000 ||
+    limits.leaseHeartbeatMs < 1 ||
+    limits.maxModelInvocations < 1
+  ) {
     throw new Error("Agent runtime context and invocation budgets must be positive");
   }
   if (limits.maxEscalationDepth > 2) {
@@ -220,6 +226,35 @@ function toolCheckpoint(
   };
 }
 
+function completedPostconditions(
+  state: RuntimeState,
+  definitions: readonly AnyToolDefinition[]
+): boolean {
+  const pending = state.run.checkpoint.pendingConsequentialOperation;
+  if (typeof pending === "object" && pending !== null && !Array.isArray(pending)) {
+    if (pending.outcome !== "confirmed" || typeof pending.tool !== "string") return false;
+    if (!state.evidence.some((item) => item.tool === pending.tool)) return false;
+  }
+
+  if (state.automation.toolPolicy === "none") return true;
+  if (definitions.length === 0) return false;
+
+  const allowedTools = new Set(definitions.map((definition) => definition.name));
+  const observation = state.run.checkpoint.lastToolObservation;
+  const successfulObservation =
+    typeof observation === "object" &&
+    observation !== null &&
+    !Array.isArray(observation) &&
+    observation.status === "success" &&
+    typeof observation.tool === "string" &&
+    allowedTools.has(observation.tool);
+
+  return (
+    successfulObservation ||
+    state.evidence.some((item) => item.tool !== undefined && allowedTools.has(item.tool))
+  );
+}
+
 export function createAgentRuntime(options: {
   clock?: () => Date;
   gateway: RuntimeToolGateway;
@@ -233,6 +268,32 @@ export function createAgentRuntime(options: {
   const clock = options.clock ?? (() => new Date());
   const knownSecrets = options.knownSecrets ?? [];
   const limits = validateLimits({ ...defaultAgentRuntimeLimits, ...options.limits });
+
+  async function withLeaseHeartbeat<T>(
+    execution: Promise<T>,
+    runId: string,
+    workerId: string
+  ): Promise<T> {
+    const settled = execution.then(
+      (value) => ({ kind: "succeeded" as const, value }),
+      (error: unknown) => ({ error, kind: "failed" as const })
+    );
+
+    while (true) {
+      let timer!: NodeJS.Timeout;
+      const heartbeat = new Promise<{ kind: "heartbeat" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "heartbeat" }), limits.leaseHeartbeatMs);
+      });
+      const outcome = await Promise.race([settled, heartbeat]);
+      clearTimeout(timer);
+
+      if (outcome.kind === "succeeded") return outcome.value;
+      if (outcome.kind === "failed") throw outcome.error;
+      if (!await options.persistence.renewLease(runId, workerId, clock())) {
+        throw new RunLeaseError("Automation run lease was lost during execution");
+      }
+    }
+  }
 
   async function terminal(
     state: RuntimeState,
@@ -371,10 +432,15 @@ export function createAgentRuntime(options: {
       let output: unknown;
       let usage: ModelUsage = {};
       try {
-        const response = await options.transport.invoke({ context, modelId, role });
+        const response = await withLeaseHeartbeat(
+          options.transport.invoke({ context, modelId, role }),
+          runId,
+          workerId
+        );
         output = response.output;
         usage = response.usage;
       } catch (error) {
+        if (error instanceof RunLeaseError) throw error;
         const failure = error instanceof ModelInvocationError ? error.failureClass : "permanent";
         const now = clock();
         await options.persistence.finishInvocation(invocationId, {
@@ -433,6 +499,15 @@ export function createAgentRuntime(options: {
       }
 
       if (decision.data.kind === "complete") {
+        if (!completedPostconditions(state, definitions)) {
+          return terminal(
+            state,
+            workerId,
+            "blocked",
+            "completion_postconditions_unmet",
+            "blocked_verification"
+          );
+        }
         await options.persistence.transition({
           checkpoint: {
             ...state.run.checkpoint,
@@ -486,15 +561,20 @@ export function createAgentRuntime(options: {
         return terminal(state, workerId, "blocked", "unauthorized_tool_requested", "blocked_policy");
       }
       if (!await options.persistence.renewLease(runId, workerId, clock())) {
-        throw new Error("Automation run lease was lost before tool execution");
+        throw new RunLeaseError("Automation run lease was lost before tool execution");
       }
-      const result = await options.gateway.execute({
-        input: decisionObjectToJsonObject(decision.data.arguments),
-        integrations: options.integrations,
+      const result = await withLeaseHeartbeat(
+        options.gateway.execute({
+          input: decisionObjectToJsonObject(decision.data.arguments),
+          integrations: options.integrations,
+          runId,
+          tool: definition.name,
+          toolPolicy: state.automation.toolPolicy,
+          workerId
+        }),
         runId,
-        tool: definition.name,
-        toolPolicy: state.automation.toolPolicy
-      });
+        workerId
+      );
       const afterTool = await options.persistence.load(runId);
       if (!afterTool) throw new Error("Automation run not found after tool execution");
       await options.persistence.saveCheckpoint({

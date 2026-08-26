@@ -311,8 +311,12 @@ describe("Calendar adapter", () => {
     await expect(update.execute(updated, context())).resolves.toMatchObject({ status: "success" });
     await expect(update.verify?.(updated, context())).resolves.toMatchObject({ status: "exists" });
     await expect(update.verify?.({ ...updated, summary: "Different" }, context())).resolves.toMatchObject({ status: "absent" });
+    await expect(update.verify?.({ ...updated, timezone: "Asia/Hong_Kong" }, context())).resolves.toMatchObject({ status: "absent" });
     await expect(update.verify?.({ ...updated, eventId: "missing" }, context())).resolves.toMatchObject({ status: "absent" });
-    update.idempotencyKey?.(updated);
+    const baseKey = update.idempotencyKey?.(updated);
+    expect(update.idempotencyKey?.({ ...updated, description: "Description" })).not.toBe(baseKey);
+    expect(update.idempotencyKey?.({ ...updated, location: "Room" })).not.toBe(baseKey);
+    expect(update.idempotencyKey?.({ ...updated, timezone: "UTC" })).not.toBe(baseKey);
     update.safeInputSummary(updated);
     update.safeOutputSummary({ end: updated.end, id: "e1", start: updated.start, summary: asUntrustedText("Updated") });
     const listDefinition = tool(fixture.registry, "calendar.list_events");

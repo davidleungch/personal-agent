@@ -32,7 +32,9 @@ function definition(name = "fixture.read", sideEffect: "read_only" | "reversible
 
 function fixture(options: {
   definitions?: readonly ReturnType<typeof definition>[];
+  gatewayDelayMs?: number;
   gatewayResults?: readonly ToolResult<unknown>[];
+  invokeDelayMs?: number;
   knownSecrets?: readonly string[];
   limits?: Parameters<typeof createAgentRuntime>[0]["limits"];
   outputs?: readonly (unknown | Error)[];
@@ -45,7 +47,10 @@ function fixture(options: {
   const calls: ModelInvocationRequest[] = [];
   const outputs = [...(options.outputs ?? [{ data: null, kind: "complete", summary: "done" }])];
   const state = {
-    automation: { goal: "Goal with untrusted observation", toolPolicy: "fixture-policy" },
+    automation: {
+      goal: "Goal with untrusted observation",
+      toolPolicy: definitions.length > 0 ? "fixture-policy" : "none"
+    },
     evidence: [{ createdAt: new Date("2026-08-26T00:00:00.000Z"), tool: "fixture.read", type: "fixture" }],
     invocations: [] as Array<{ schemaOutcome: "not_requested" | "valid" | "invalid"; status: "started" | "succeeded" | "failed"; summary?: string }>,
     recentEvents: [{ createdAt: new Date("2026-08-26T00:00:00.000Z"), eventType: "run_started", payload: {} }],
@@ -93,7 +98,12 @@ function fixture(options: {
       if (input.workflowPhase) state.run.workflowPhase = input.workflowPhase;
     }
   };
-  const gatewayExecute = vi.fn(async () => gatewayResults.shift() ?? { data: { value: "read" }, retryable: false, status: "success" as const });
+  const gatewayExecute = vi.fn(async () => {
+    if (options.gatewayDelayMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, options.gatewayDelayMs));
+    }
+    return gatewayResults.shift() ?? { data: { value: "read" }, retryable: false, status: "success" as const };
+  });
   const gateway: RuntimeToolGateway = {
     execute: gatewayExecute,
     resolveDefinitions: () => definitions as never
@@ -101,6 +111,9 @@ function fixture(options: {
   const transport: ModelTransport = {
     invoke: async (request) => {
       calls.push(request);
+      if (options.invokeDelayMs) {
+        await new Promise<void>((resolve) => setTimeout(resolve, options.invokeDelayMs));
+      }
       const output = outputs.shift();
       if (output instanceof Error) throw output;
       return { output, usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } };
@@ -143,6 +156,54 @@ describe("deterministic Agent Runtime", () => {
     expect(blocked.transitions.at(-1)).toMatchObject({ errorSummary: "model_blocked_policy_blocked" });
   });
 
+  it("requires durable postconditions before completing a tool-backed run", async () => {
+    const unavailable = fixture();
+    unavailable.state.automation.toolPolicy = "fixture-policy";
+    await expect(unavailable.runtime.execute(runId, "worker")).resolves.toBe("blocked");
+
+    const untouched = fixture({ definitions: [definition("fixture.write", "consequential")] });
+    untouched.state.evidence = [];
+    await expect(untouched.runtime.execute(runId, "worker")).resolves.toBe("blocked");
+    expect(untouched.transitions.at(-1)).toMatchObject({
+      errorSummary: "completion_postconditions_unmet",
+      toStatus: "blocked"
+    });
+
+    const unresolved = fixture({ definitions: [definition("fixture.write", "consequential")] });
+    unresolved.state.run.checkpoint = {
+      pendingConsequentialOperation: {
+        idempotencyKey: "stable",
+        outcome: "unknown",
+        tool: "fixture.write"
+      }
+    } as never;
+    await expect(unresolved.runtime.execute(runId, "worker")).resolves.toBe("blocked");
+
+    const unproven = fixture({ definitions: [definition("fixture.write", "consequential")] });
+    unproven.state.evidence = [];
+    unproven.state.run.checkpoint = {
+      pendingConsequentialOperation: {
+        idempotencyKey: "stable",
+        outcome: "confirmed",
+        tool: "fixture.write"
+      }
+    } as never;
+    await expect(unproven.runtime.execute(runId, "worker")).resolves.toBe("blocked");
+
+    const confirmed = fixture({ definitions: [definition("fixture.write", "consequential")] });
+    confirmed.state.evidence = [
+      { createdAt: new Date("2026-08-26T00:00:00.000Z"), tool: "fixture.write", type: "confirmation" }
+    ];
+    confirmed.state.run.checkpoint = {
+      pendingConsequentialOperation: {
+        idempotencyKey: "stable",
+        outcome: "confirmed",
+        tool: "fixture.write"
+      }
+    } as never;
+    await expect(confirmed.runtime.execute(runId, "worker")).resolves.toBe("succeeded");
+  });
+
   it("executes an authorized tool only through the gateway and continues freshly", async () => {
     const read = definition();
     const test = fixture({
@@ -167,6 +228,30 @@ describe("deterministic Agent Runtime", () => {
     test.renewLease.mockResolvedValueOnce(false);
     await expect(test.runtime.execute(runId, "worker")).rejects.toThrow("lease was lost");
     expect(test.gatewayExecute).not.toHaveBeenCalled();
+  });
+
+  it("renews the lease while model and tool execution remain in flight", async () => {
+    const test = fixture({
+      definitions: [definition()],
+      gatewayDelayMs: 5,
+      gatewayResults: [{ data: { value: "read" }, retryable: false, status: "success" }],
+      invokeDelayMs: 5,
+      limits: { leaseHeartbeatMs: 1 },
+      outputs: [
+        { arguments: { entries: [] }, kind: "invoke_tool", tool: "fixture.read" },
+        { data: null, kind: "complete", summary: "done" }
+      ]
+    });
+    const invoke = test.runtime.execute(runId, "worker");
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await expect(invoke).resolves.toBe("succeeded");
+    expect(test.renewLease).toHaveBeenCalled();
+
+    const lost = fixture({ invokeDelayMs: 5, limits: { leaseHeartbeatMs: 1 } });
+    lost.renewLease.mockResolvedValue(false);
+    await expect(lost.runtime.execute(runId, "worker")).rejects.toThrow(
+      "lease was lost during execution"
+    );
   });
 
   it("exposes only resolved tools and external injection cannot expand policy", async () => {
@@ -284,6 +369,7 @@ describe("deterministic Agent Runtime", () => {
   it("validates limits and covers reversible-risk routing", async () => {
     expect(() => fixture({ limits: { maxTransportRetries: -1 } })).toThrow("non-negative integers");
     expect(() => fixture({ limits: { contextCharacters: 1_999 } })).toThrow("budgets must be positive");
+    expect(() => fixture({ limits: { leaseHeartbeatMs: 0 } })).toThrow("budgets must be positive");
     expect(() => fixture({ limits: { maxModelInvocations: 0 } })).toThrow("budgets must be positive");
     expect(() => fixture({ limits: { maxEscalationDepth: 3 } })).toThrow("semantic profile depth");
     const reversible = fixture({ definitions: [definition("fixture.edit", "reversible")] });

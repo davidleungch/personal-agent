@@ -25,11 +25,12 @@ export type GatewayRequest = {
   runId: string;
   tool: string;
   toolPolicy: string;
+  workerId?: string;
 };
 
 type AttemptOutcome = {
+  canRetryAfterAbsent: boolean;
   result: ToolResult<unknown>;
-  sideEffectStarted: boolean;
 };
 
 type ValidatedVerificationResult =
@@ -194,24 +195,24 @@ export function createToolGateway(options: {
     );
     if (outcome.timedOut) {
       return {
+        canRetryAfterAbsent: false,
         result:
           definition.sideEffect === "consequential" && sideEffectStarted
             ? unknown("timeout")
-            : failed("timeout", true),
-        sideEffectStarted
+            : failed("timeout", true)
       };
     }
     if (outcome.error !== undefined) {
       const classified = failureFromError(outcome.error);
       return {
+        canRetryAfterAbsent: true,
         result:
           definition.sideEffect === "consequential" && sideEffectStarted
             ? unknown(classified.failureClass)
-            : failed(classified.failureClass, classified.retryable),
-        sideEffectStarted
+            : failed(classified.failureClass, classified.retryable)
       };
     }
-    return { result: outcome.value!, sideEffectStarted };
+    return { canRetryAfterAbsent: true, result: outcome.value! };
   }
 
   async function verify(
@@ -242,6 +243,7 @@ export function createToolGateway(options: {
 
   async function execute(request: GatewayRequest): Promise<ToolResult<unknown>> {
     const requestedAt = clock();
+    const leaseOwner = request.workerId ? { workerId: request.workerId } : {};
     const definition = options.registry.get(request.tool);
     const genericSummary = genericInputSummary(request.input);
     if (!definition) {
@@ -291,7 +293,8 @@ export function createToolGateway(options: {
         key: idempotencyKey!,
         now: clock(),
         runId: request.runId,
-        scope: definition.name
+        scope: definition.name,
+        ...leaseOwner
       });
       if (!reservation.inserted) {
         if (reservation.record.state === "reserved") {
@@ -311,7 +314,8 @@ export function createToolGateway(options: {
             });
           }
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
           const result: ToolResult<unknown> = {
             data: verification.data,
@@ -341,7 +345,8 @@ export function createToolGateway(options: {
           );
           await audit(request, definition, 1, requestedAt, result, inputSummary, { status: "verification_unknown" }, idempotencyKey);
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
           return result;
         }
@@ -359,7 +364,8 @@ export function createToolGateway(options: {
         }
       }
       await options.persistence.markConsequentialPending({
-        idempotencyKey: idempotencyKey!, now: clock(), runId: request.runId, tool: definition.name
+        idempotencyKey: idempotencyKey!, now: clock(), runId: request.runId, tool: definition.name,
+        ...leaseOwner
       });
     }
 
@@ -385,7 +391,8 @@ export function createToolGateway(options: {
             expected: "reserved", key: idempotencyKey!, now: clock(), scope: definition.name, state: "confirmed"
           });
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
         }
         return validated.result;
@@ -401,7 +408,8 @@ export function createToolGateway(options: {
             expected: "unknown", key: idempotencyKey!, now: clock(), scope: definition.name, state: "confirmed"
           });
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "confirmed", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
           const result: ToolResult<unknown> = {
             data: verification.data,
@@ -424,6 +432,7 @@ export function createToolGateway(options: {
           return result;
         }
         const mayRetry =
+          attempted.canRetryAfterAbsent &&
           verification.status === "absent" &&
           attempt < definition.retryPolicy.maxAttempts &&
           definition.retryPolicy.retryableFailureClasses.includes(
@@ -435,20 +444,24 @@ export function createToolGateway(options: {
           });
           if (!claimed) {
             await options.persistence.markConsequentialOutcome({
-              idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name
+              idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name,
+              ...leaseOwner
             });
             return validated.result;
           }
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "absent", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "absent", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
           await options.persistence.markConsequentialPending({
-            idempotencyKey: idempotencyKey!, now: clock(), runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
           continue;
         }
         await options.persistence.markConsequentialOutcome({
-          idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name
+          idempotencyKey: idempotencyKey!, now: clock(), outcome: "unknown", runId: request.runId, tool: definition.name,
+          ...leaseOwner
         });
         return validated.result;
       }
@@ -463,7 +476,8 @@ export function createToolGateway(options: {
       if (!mayRetry) {
         if (definition.sideEffect === "consequential") {
           await options.persistence.markConsequentialOutcome({
-            idempotencyKey: idempotencyKey!, now: clock(), outcome: "failed", runId: request.runId, tool: definition.name
+            idempotencyKey: idempotencyKey!, now: clock(), outcome: "failed", runId: request.runId, tool: definition.name,
+            ...leaseOwner
           });
         }
         return validated.result;

@@ -185,6 +185,24 @@ describe("deterministic gateway policy and normalization", () => {
     const thrown = await runFixture();
     const thrownSubmit = definition({ execute: async (_input, executionContext) => { executionContext.reportSideEffectStarted(); throw new ToolExecutionError("transport_error", true); }, name: "browser.submit", sideEffect: "consequential", verify: async (_input, verificationContext) => { verificationContext.reportSideEffectStarted(); return { status: "unknown" }; } });
     await expect(gateway(thrown.id, thrownSubmit).execute({ input: { operationKey: "thrown", value: "safe" }, toolPolicy: "course-registration" })).resolves.toMatchObject({ status: "unknown" });
+
+    let executions = 0;
+    const stillRunning = await runFixture();
+    const delayedSubmit = definition({
+      execute: async (_input, executionContext) => {
+        executions += 1;
+        executionContext.reportSideEffectStarted();
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        return { data: { value: "late-success" }, retryable: false, status: "success" };
+      },
+      maxAttempts: 2,
+      name: "browser.submit",
+      sideEffect: "consequential",
+      timeoutMs: 5,
+      verify: async () => ({ status: "absent" })
+    });
+    await expect(gateway(stillRunning.id, delayedSubmit).execute({ input: { operationKey: "still-running", value: "safe" }, toolPolicy: "course-registration" })).resolves.toMatchObject({ status: "unknown" });
+    expect(executions).toBe(1);
   });
 });
 
@@ -354,7 +372,36 @@ describe("consequential idempotency and verification", () => {
     await persistence.reserveIdempotency({ key: "lookup", now: new Date(), runId: run.id, scope: "fixture.tool" });
     await expect(persistence.readIdempotency("fixture.tool", "lookup")).resolves.toMatchObject({ state: "reserved" });
     const missing = "00000000-0000-4000-8000-000000000099";
-    await expect(persistence.markConsequentialPending({ idempotencyKey: "key", now: new Date(), runId: missing, tool: "browser.submit" })).rejects.toThrow("Automation run not found");
-    await expect(persistence.markConsequentialOutcome({ idempotencyKey: "key", now: new Date(), outcome: "unknown", runId: missing, tool: "browser.submit" })).rejects.toThrow("Automation run not found");
+    await expect(persistence.markConsequentialPending({ idempotencyKey: "key", now: new Date(), runId: missing, tool: "browser.submit" })).rejects.toThrow("lease is not current");
+    await expect(persistence.markConsequentialOutcome({ idempotencyKey: "key", now: new Date(), outcome: "unknown", runId: missing, tool: "browser.submit" })).rejects.toThrow("lease is not current");
+  });
+
+  it("fences consequential writes with the current worker lease", async () => {
+    const run = await runFixture();
+    const now = new Date();
+    await database
+      .update(automationRuns)
+      .set({
+        claimedAt: now,
+        claimedBy: "current-worker",
+        leaseExpiresAt: new Date(now.getTime() + 60_000)
+      })
+      .where(eq(automationRuns.id, run.id));
+    const submit = definition({
+      execute: async () => ({ data: { value: "created" }, retryable: false, status: "success" }),
+      name: "browser.submit",
+      sideEffect: "consequential",
+      verify: async () => ({ status: "absent" })
+    });
+    await expect(gateway(run.id, submit).execute({
+      input: { operationKey: "stale", value: "safe" },
+      toolPolicy: "course-registration",
+      workerId: "stale-worker"
+    })).rejects.toThrow("lease is not current");
+    await expect(gateway(run.id, submit).execute({
+      input: { operationKey: "current", value: "safe" },
+      toolPolicy: "course-registration",
+      workerId: "current-worker"
+    })).resolves.toMatchObject({ status: "success" });
   });
 });

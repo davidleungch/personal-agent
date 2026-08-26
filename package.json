@@ -12,8 +12,8 @@
     "build": "pnpm -r --if-present build",
     "dev": "pnpm --parallel --filter @personal-agent/app --filter @personal-agent/worker dev",
     "lint": "eslint .",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test": "node run-tests.mjs",
+    "test:coverage": "node run-tests.mjs --coverage",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {

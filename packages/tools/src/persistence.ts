@@ -12,7 +12,7 @@ import {
   idempotencyStateSchema,
   type JsonObject
 } from "@personal-agent/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import type { FailureClass, ToolEvidence, ToolStatus } from "./contract.js";
 
 export type ToolAuditInput = {
@@ -45,12 +45,14 @@ export interface ToolPersistence {
     outcome: "absent" | "confirmed" | "failed" | "unknown";
     runId: string;
     tool: string;
+    workerId?: string;
   }): Promise<void>;
   markConsequentialPending(input: {
     idempotencyKey: string;
     now: Date;
     runId: string;
     tool: string;
+    workerId?: string;
   }): Promise<void>;
   readIdempotency(scope: string, key: string): Promise<IdempotencyRecord | undefined>;
   reserveIdempotency(input: {
@@ -58,6 +60,7 @@ export interface ToolPersistence {
     now: Date;
     runId: string;
     scope: string;
+    workerId?: string;
   }): Promise<{ inserted: boolean; record: IdempotencyRecord }>;
   transitionIdempotency(input: {
     expected: "reserved" | "unknown";
@@ -83,6 +86,16 @@ function operationCheckpoint(
 }
 
 export function createDatabaseToolPersistence(database: Database): ToolPersistence {
+  function ownedRun(input: { now: Date; runId: string; workerId?: string }) {
+    return input.workerId
+      ? and(
+          eq(automationRuns.id, input.runId),
+          eq(automationRuns.claimedBy, input.workerId),
+          gt(automationRuns.leaseExpiresAt, input.now)
+        )
+      : eq(automationRuns.id, input.runId);
+  }
+
   return {
     audit: async (input, evidenceItems) => {
       const toolCallId = randomUUID();
@@ -120,10 +133,10 @@ export function createDatabaseToolPersistence(database: Database): ToolPersisten
         const [run] = await transaction
           .select()
           .from(automationRuns)
-          .where(eq(automationRuns.id, input.runId))
+          .where(ownedRun(input))
           .limit(1)
           .for("update");
-        if (!run) throw new Error("Automation run not found");
+        if (!run) throw new Error("Automation run lease is not current");
         const fromStatus = automationRunStatusSchema.parse(run.status);
         const entersVerification = input.outcome === "unknown" && fromStatus === "running";
         const status = entersVerification ? "verifying" : fromStatus;
@@ -135,7 +148,7 @@ export function createDatabaseToolPersistence(database: Database): ToolPersisten
             updatedAt: input.now,
             workflowPhase: input.outcome === "unknown" ? "verifying_tool_call" : "tool_call_recorded"
           })
-          .where(eq(automationRuns.id, input.runId));
+          .where(ownedRun(input));
         await transaction.insert(runEvents).values({
           createdAt: input.now,
           eventType:
@@ -158,10 +171,10 @@ export function createDatabaseToolPersistence(database: Database): ToolPersisten
         const [run] = await transaction
           .select()
           .from(automationRuns)
-          .where(eq(automationRuns.id, input.runId))
+          .where(ownedRun(input))
           .limit(1)
           .for("update");
-        if (!run) throw new Error("Automation run not found");
+        if (!run) throw new Error("Automation run lease is not current");
         await transaction
           .update(automationRuns)
           .set({
@@ -169,7 +182,7 @@ export function createDatabaseToolPersistence(database: Database): ToolPersisten
             updatedAt: input.now,
             workflowPhase: "tool_call_pending"
           })
-          .where(eq(automationRuns.id, input.runId));
+          .where(ownedRun(input));
         await transaction.insert(runEvents).values({
           createdAt: input.now,
           eventType: "consequential_operation_pending",
@@ -197,6 +210,15 @@ export function createDatabaseToolPersistence(database: Database): ToolPersisten
 
     reserveIdempotency: async (input) => {
       return database.transaction(async (transaction) => {
+        if (input.workerId) {
+          const [run] = await transaction
+            .select({ id: automationRuns.id })
+            .from(automationRuns)
+            .where(ownedRun(input))
+            .limit(1)
+            .for("update");
+          if (!run) throw new Error("Automation run lease is not current");
+        }
         const inserted = await transaction
           .insert(idempotencyRecords)
           .values({
