@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   automationRunStatusSchema,
   automationRunTriggerSchema,
+  canTransitionAutomationRun,
   commandStatusSchema,
+  completionModeSchema,
   createSecretFreeJsonSchema,
   createSecretFreeTextSchema,
   idempotencyStateSchema,
@@ -17,6 +19,7 @@ import {
   redactJson,
   redactText,
   sideEffectClassSchema,
+  toolPolicySchema,
   toolStatusSchema
 } from "../src/index";
 
@@ -34,6 +37,10 @@ describe("domain validation", () => {
     expect(toolStatusSchema.options.map((value) => toolStatusSchema.parse(value))).toHaveLength(3);
     expect(idempotencyStateSchema.options.map((value) => idempotencyStateSchema.parse(value))).toHaveLength(3);
     expect(sideEffectClassSchema.options.map((value) => sideEffectClassSchema.parse(value))).toHaveLength(3);
+    expect(toolPolicySchema.options).toHaveLength(7);
+    expect(completionModeSchema.options).toEqual(["continue", "stop_after_success"]);
+    expect(canTransitionAutomationRun("needs_human", "queued")).toBe(true);
+    expect(canTransitionAutomationRun("succeeded", "queued")).toBe(false);
   });
 
   it("accepts JSON values and objects but rejects non-JSON numbers", () => {
@@ -109,10 +116,15 @@ describe("configuration", () => {
   const databaseUrl = "postgresql://user:password@localhost:5432/personal_agent";
 
   it("parses app database configuration", () => {
-    expect(parseAppConfiguration({ DATABASE_URL: databaseUrl })).toEqual({ databaseUrl });
-    expect(parseAppConfiguration({ DATABASE_URL: "postgres://localhost/database" })).toEqual({
-      databaseUrl: "postgres://localhost/database"
+    expect(parseAppConfiguration({ DATABASE_URL: databaseUrl })).toEqual({
+      databaseUrl,
+      workerHealthUrl: "http://127.0.0.1:3001/health"
     });
+    expect(parseAppConfiguration({ DATABASE_URL: "postgres://localhost/database" })).toEqual({
+      databaseUrl: "postgres://localhost/database",
+      workerHealthUrl: "http://127.0.0.1:3001/health"
+    });
+    expect(parseAppConfiguration({ DATABASE_URL: databaseUrl, WORKER_HEALTH_URL: "http://worker:3001/health" }).workerHealthUrl).toBe("http://worker:3001/health");
   });
 
   it("rejects absent, malformed, and non-PostgreSQL database URLs", () => {
@@ -123,6 +135,7 @@ describe("configuration", () => {
     expect(() => parseAppConfiguration({ DATABASE_URL: "https://example.com/database" })).toThrow(
       "DATABASE_URL must be a PostgreSQL URL"
     );
+    expect(() => parseAppConfiguration({ DATABASE_URL: databaseUrl, WORKER_HEALTH_URL: "invalid" })).toThrow();
   });
 
   it("keeps integrations unavailable without credentials and applies model defaults", () => {

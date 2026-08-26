@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { automationRuns, idempotencyRecords, runEvents, type Database } from "@personal-agent/db";
 import {
   automationRunStatusSchema,
+  canTransitionAutomationRun,
   createSecretFreeJsonSchema,
   createSecretFreeTextSchema,
   type JsonObject
@@ -9,18 +10,6 @@ import {
 import { and, asc, eq, isNull, lte, sql } from "drizzle-orm";
 
 type RunStatus = (typeof automationRunStatusSchema)["_output"];
-
-const validTransitions: Readonly<Record<RunStatus, readonly RunStatus[]>> = {
-  blocked: [],
-  cancelled: [],
-  failed: [],
-  needs_human: ["queued"],
-  queued: ["running"],
-  retry_wait: ["queued"],
-  running: ["succeeded", "verifying", "retry_wait", "needs_human", "failed", "blocked", "cancelled"],
-  succeeded: [],
-  verifying: ["succeeded", "retry_wait", "blocked"]
-};
 
 export class InvalidRunTransitionError extends Error {
   constructor(from: RunStatus, to: RunStatus) {
@@ -212,7 +201,7 @@ export function createRunState(database: Database, knownSecrets: readonly string
 
       const fromStatus = automationRunStatusSchema.parse(current.status);
 
-      if (!validTransitions[fromStatus].includes(toStatus)) {
+      if (!canTransitionAutomationRun(fromStatus, toStatus)) {
         throw new InvalidRunTransitionError(fromStatus, toStatus);
       }
 

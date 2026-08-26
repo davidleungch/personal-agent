@@ -3,6 +3,7 @@ import {
   automationRunStatusSchema,
   automationRunTriggerSchema,
   commandStatusSchema,
+  completionModeSchema,
   createSecretFreeJsonSchema,
   createSecretFreeTextSchema,
   idempotencyStateSchema,
@@ -56,7 +57,7 @@ export function createRepositories(database: Database, knownSecrets: readonly st
   });
 
   const automationInput = z.object({
-    completionMode: z.enum(["continue", "stop_after_success"]),
+    completionMode: completionModeSchema,
     enabled: z.boolean().default(true),
     goal: safeNonEmpty,
     lastRunAt: z.date().optional(),

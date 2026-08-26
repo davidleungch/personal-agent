@@ -38,9 +38,18 @@ importers:
 
   apps/app:
     dependencies:
+      '@personal-agent/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@personal-agent/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      croner:
+        specifier: 10.0.1
+        version: 10.0.1
+      drizzle-orm:
+        specifier: 0.45.2
+        version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
       next:
         specifier: 16.3.2
         version: 16.3.2(@babel/core@7.29.7(supports-color@7.2.0))(@playwright/test@1.62.1)(@types/node@22.20.1)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -53,6 +62,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@playwright/test':
+        specifier: 1.62.1
+        version: 1.62.1
 
   apps/worker:
     dependencies:

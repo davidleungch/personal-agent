@@ -1,10 +1,7 @@
-export function GET(): Response {
-  return Response.json({
-    integrations: {
-      google: "unavailable",
-      openai: "unavailable"
-    },
-    service: "app",
-    status: "ok"
-  });
+import { getAppRuntime } from "../../server/runtime";
+
+export const dynamic = "force-dynamic";
+
+export function GET() {
+  return getAppRuntime().api.health();
 }

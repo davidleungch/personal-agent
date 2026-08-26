@@ -40,6 +40,7 @@ describe("worker scaffold", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       integrations: {
+        browser: "available",
         google: "unavailable",
         openai: "unavailable"
       },

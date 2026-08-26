@@ -27,6 +27,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://personal_agent:personal_agent_local@postgres:5432/personal_agent
+      WORKER_HEALTH_URL: http://worker:3001/health
     healthcheck:
       test:
         [

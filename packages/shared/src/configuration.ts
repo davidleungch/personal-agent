@@ -23,14 +23,20 @@ const environmentSchema = z.object({
   MODEL_BALANCED: z.string().min(1).default("gpt-5.6-terra"),
   MODEL_FAST: z.string().min(1).default("gpt-5.6-luna"),
   MODEL_REASONING: z.string().min(1).default("gpt-5.6-sol"),
-  OPENAI_API_KEY_FILE: z.string().min(1).optional()
+  OPENAI_API_KEY_FILE: z.string().min(1).optional(),
+  WORKER_HEALTH_URL: z.url().default("http://127.0.0.1:3001/health")
 });
 
 export type Environment = Record<string, string | undefined>;
 
 export function parseAppConfiguration(environment: Environment) {
-  const configuration = environmentSchema.pick({ DATABASE_URL: true }).parse(environment);
-  return { databaseUrl: configuration.DATABASE_URL };
+  const configuration = environmentSchema
+    .pick({ DATABASE_URL: true, WORKER_HEALTH_URL: true })
+    .parse(environment);
+  return {
+    databaseUrl: configuration.DATABASE_URL,
+    workerHealthUrl: configuration.WORKER_HEALTH_URL
+  };
 }
 
 export function parseWorkerConfiguration(environment: Environment) {

@@ -32,7 +32,11 @@ export function createHealthServer(
     openai: "unavailable"
   }
 ): Server {
-  const healthPayload = JSON.stringify({ integrations, service: "worker", status: "ok" });
+  const healthPayload = JSON.stringify({
+    integrations: { browser: "available", ...integrations },
+    service: "worker",
+    status: "ok"
+  });
   return createServer((request, response) => {
     response.setHeader("content-type", "application/json");
 

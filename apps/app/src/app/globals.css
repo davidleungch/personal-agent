@@ -1,5 +1,7 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+  background: #f4f1e9;
+  color: #17211d;
   font-family: system-ui, sans-serif;
 }
 
@@ -8,7 +10,232 @@ body {
 }
 
 main {
-  margin: 4rem auto;
-  max-width: 48rem;
-  padding: 0 1.5rem;
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: 2rem 1.25rem 5rem;
+}
+
+header,
+.section-heading,
+.record summary,
+.run-link {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+header {
+  border-bottom: 1px solid #b8c2ba;
+  padding-bottom: 1.5rem;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: clamp(2rem, 6vw, 4.5rem);
+  letter-spacing: -0.06em;
+  margin-bottom: 0;
+}
+
+section {
+  border-bottom: 1px solid #b8c2ba;
+  padding: 2rem 0;
+}
+
+.eyebrow {
+  color: #567065;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  margin-bottom: 0.35rem;
+  text-transform: uppercase;
+}
+
+.status-grid,
+.audit-grid,
+.form-grid,
+dl {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.status-grid {
+  grid-template-columns: repeat(2, auto);
+}
+
+.state {
+  background: #dce4dd;
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  text-transform: uppercase;
+}
+
+.state-failed,
+.state-blocked,
+.state-unavailable,
+.state-cancelled {
+  background: #f0c9bd;
+}
+
+.state-running,
+.state-verifying,
+.state-needs_human {
+  background: #f3df9c;
+}
+
+.message {
+  background: #dce4dd;
+  margin: 1rem 0 0;
+  padding: 0.85rem 1rem;
+}
+
+.message.error {
+  background: #f0c9bd;
+}
+
+form,
+.stack {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.command-form {
+  grid-template-columns: 1fr auto;
+}
+
+.form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 1rem;
+}
+
+label {
+  display: grid;
+  font-size: 0.78rem;
+  font-weight: 700;
+  gap: 0.3rem;
+}
+
+label.wide,
+.form-grid button {
+  grid-column: 1 / -1;
+}
+
+label.check {
+  align-items: center;
+  display: flex;
+}
+
+input,
+select,
+textarea,
+button {
+  border: 1px solid #8b9b91;
+  border-radius: 0;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 0.65rem 0.75rem;
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+button {
+  background: #173f32;
+  color: white;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.editor,
+.record,
+.empty {
+  background: #fffdf8;
+  border: 1px solid #c8d0c9;
+  padding: 1rem;
+}
+
+.editor {
+  margin-bottom: 0.75rem;
+}
+
+summary {
+  cursor: pointer;
+}
+
+.record p {
+  margin: 0.75rem 0;
+}
+
+.run-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+dl {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+dl div {
+  min-width: 0;
+}
+
+dt {
+  color: #567065;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.audit-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 1.5rem;
+}
+
+.audit-grid article {
+  background: #fffdf8;
+  border: 1px solid #c8d0c9;
+  padding: 1rem;
+}
+
+.audit-grid ul {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+code {
+  font-size: 0.78em;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  header,
+  .section-heading,
+  .record summary,
+  .run-link {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .command-form,
+  .form-grid,
+  .audit-grid,
+  dl {
+    grid-template-columns: 1fr;
+  }
 }

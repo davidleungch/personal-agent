@@ -1,13 +1,7 @@
+import { toolPolicySchema, type ToolPolicy } from "@personal-agent/shared";
 import type { PermissionClass } from "./contract.js";
 
-export type ToolPolicy =
-  | "none"
-  | "browser-read"
-  | "browser-interact"
-  | "gmail-read"
-  | "calendar-read"
-  | "calendar-write"
-  | "course-registration";
+export type { ToolPolicy } from "@personal-agent/shared";
 
 const policyTools: Readonly<Record<ToolPolicy, readonly string[]>> = Object.freeze({
   "browser-interact": [
@@ -70,8 +64,9 @@ export function resolveCapabilities(
   toolPolicy: string,
   integrations: IntegrationAvailability
 ): ResolvedCapabilities {
-  const configured = Object.hasOwn(policyTools, toolPolicy);
-  const policy = configured ? (toolPolicy as ToolPolicy) : "none";
+  const parsedPolicy = toolPolicySchema.safeParse(toolPolicy);
+  const configured = parsedPolicy.success;
+  const policy = parsedPolicy.success ? parsedPolicy.data : "none";
   const unavailable = new Set<"browser" | "google">();
   if (integrations.browser === "unavailable") unavailable.add("browser");
   if (integrations.google === "unavailable") unavailable.add("google");

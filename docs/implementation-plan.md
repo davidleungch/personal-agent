@@ -7,10 +7,10 @@ Autonomous Agent Platform. [`docs/design.md`](design.md) remains the product and
 architecture source of truth. If this plan conflicts with the design, the design
 wins unless the user approves an explicit architecture decision.
 
-Milestones 1–5 are COMPLETE and have been reviewed. Their architectural
+Milestones 1–6 are COMPLETE and have been reviewed. Their architectural
 contracts below remain the historical and operational source of truth.
-Milestone 6 — Product Surfaces is NEXT / NOT STARTED and is the only currently
-authorized implementation milestone. Milestone 7 is NOT STARTED.
+Milestone 7 — Phase 1 Acceptance is NEXT / NOT STARTED and is the only currently
+authorized implementation milestone.
 
 ## Repository structure
 
@@ -153,9 +153,10 @@ The Next.js app owns presentation, request validation, and database-backed HTTP
 boundaries. Planned endpoints are:
 
 - `POST /api/commands` and `GET /api/commands/:id`
-- `GET`, `POST`, and `PATCH /api/automations`
+- `GET` and `POST /api/automations`, and `PATCH /api/automations/:id`
 - `GET /api/runs` and `GET /api/runs/:id`
 - `POST /api/runs/:id/resume`
+- `GET /api/status`
 - `GET /health`
 
 The app never receives OpenAI or Google credentials. It binds to host loopback in
@@ -325,9 +326,9 @@ named volumes. Verify `linux/amd64` and `linux/arm64` image builds.
    idempotency, unknown verification, Browser, Gmail, and Calendar boundaries.
 5. **Agent runtime — COMPLETE** — fresh Agents SDK runs, structured output, semantic profile
    routing, durable context compilation, and deterministic escalation.
-6. **Product surfaces — NEXT / NOT STARTED** — command creation, automation review/editing, run and
+6. **Product surfaces — COMPLETE** — command creation, automation review/editing, run and
    activity views, evidence, and human resume.
-7. **Phase 1 acceptance — NOT STARTED** — complete fixture workflow, optional live smoke tests,
+7. **Phase 1 acceptance — NEXT / NOT STARTED** — complete fixture workflow, optional live smoke tests,
    restart/resume verification, clean-checkout setup, and all 25 design criteria.
 
 ## Testing and coverage
@@ -355,17 +356,17 @@ and clean artifacts in `finally`-style teardown. Calendar event deletion belongs
 only to this test harness. An unverified outcome is reported as `unknown` with
 manual cleanup instructions.
 
-## Milestone 6 handoff
+## Milestone 7 handoff
 
-Milestones 1–5 are complete and reviewed. The contracts above for those milestones
+Milestones 1–6 are complete and reviewed. The contracts above for those milestones
 remain authoritative for their implemented behavior and operational guarantees.
-Milestone 6 is not started and is the only currently authorized implementation
+Milestone 7 is not started and is the only currently authorized implementation
 milestone. This documentation update does not begin its implementation.
 
 The current handoff instruction is:
 
-> Implement Phase 1 Milestone 6 from `docs/implementation-plan.md`: Product
-> Surfaces only. Add the validated database-backed command, automation,
-> run/activity, evidence, and human-resume HTTP/UI boundaries required by Phase 1.
-> Preserve the completed Milestones 1–5 contracts, run every applicable quality
-> gate, and stop for review before beginning Milestone 7.
+> Implement Phase 1 Milestone 7 from `docs/implementation-plan.md`: Phase 1
+> Acceptance only. Validate the complete deterministic fixture workflow, restart
+> and resume behavior, clean-checkout setup, credential-gated smoke-test
+> boundaries, and all 25 Phase 1 Definition of Done criteria. Preserve the
+> completed Milestones 1–6 contracts and do not begin Phase 2 or Phase 3.
