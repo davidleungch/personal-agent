@@ -18,10 +18,12 @@ import {
   createAgentRuntime,
   createDatabaseAgentRuntimePersistence
 } from "./agent-runtime.js";
+import { createCommandProcessor } from "./command-processor.js";
 import { createRunState } from "./run-state.js";
 import { createDurablePolling } from "./runtime.js";
 
 export * from "./agent-runtime.js";
+export * from "./command-processor.js";
 export * from "./run-state.js";
 export * from "./runtime.js";
 export * from "./scheduler.js";
@@ -98,6 +100,10 @@ export async function createConfiguredAgentExecutor(
     googleCredentials?.clientSecret,
     googleCredentials?.refreshToken
   ].filter((value): value is string => Boolean(value));
+  const modelTransport = openaiApiKey
+    ? (dependencies.modelTransportFactory ??
+        ((apiKey) => new OpenAIAgentsModelTransport(apiKey)))(openaiApiKey)
+    : undefined;
   const gateway = createToolGateway({
     knownSecrets,
     persistence: createDatabaseToolPersistence(database),
@@ -114,18 +120,23 @@ export async function createConfiguredAgentExecutor(
     limits: configuration.agentLimits,
     models: configuration.models,
     persistence: createDatabaseAgentRuntimePersistence(database, knownSecrets),
-    ...(openaiApiKey
-      ? {
-          transport: (dependencies.modelTransportFactory ??
-            ((apiKey) => new OpenAIAgentsModelTransport(apiKey)))(openaiApiKey)
-        }
-      : {})
+    ...(modelTransport ? { transport: modelTransport } : {})
   });
   const runState = createRunState(database, knownSecrets);
   const workerId = dependencies.workerId ?? randomUUID();
+  const commandProcessor = createCommandProcessor({
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+    database,
+    knownSecrets,
+    models: configuration.models,
+    ...(modelTransport ? { transport: modelTransport } : {})
+  });
 
   return {
     close: () => browser.close(),
+    processCommand: async () => {
+      await commandProcessor.processNext(workerId);
+    },
     executeRun: async (now: Date) => {
       const run = await runState.claimRun(workerId, now, 60_000);
       if (run) await runtime.execute(run.id, workerId);
@@ -145,7 +156,10 @@ export async function startWorker(
     configuration,
     dependencies
   );
-  const polling = createDurablePolling(connection.database, { executeRun: executor.executeRun });
+  const polling = createDurablePolling(connection.database, {
+    executeRun: executor.executeRun,
+    processCommand: executor.processCommand
+  });
   const server = createHealthServer(configuration.integrations);
 
   await polling.tick();

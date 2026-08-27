@@ -7,6 +7,7 @@ import { ScriptedModel, assistantMessage, modelError } from "@openai/agents/test
 import { describe, expect, it } from "vitest";
 import {
   boundedModelValue,
+  automationCommandDecisionSchema,
   compileDurableContext,
   decisionObjectToJsonObject,
   modelDecisionSchema,
@@ -74,6 +75,26 @@ describe("strict structured decisions", () => {
     expect(modelDecisionSchema.safeParse({ arguments: { entries: [] }, extra: true, kind: "invoke_tool", tool: "browser.open" }).success).toBe(false);
     expect(modelDecisionSchema.safeParse({ kind: "free_form", text: "do anything" }).success).toBe(false);
   });
+
+  it("accepts only bounded Phase 1 automation command decisions", () => {
+    const decision = {
+      automation: {
+        completionMode: "continue",
+        goal: "Check daily",
+        modelProfile: "fast",
+        name: "Daily check",
+        schedule: "0 9 * * *",
+        timezone: "Asia/Hong_Kong",
+        toolPolicy: "browser-read"
+      },
+      kind: "automation_create"
+    };
+    expect(automationCommandDecisionSchema.parse(decision)).toEqual(decision);
+    expect(automationCommandDecisionSchema.parse({ kind: "needs_input", prompt: "Which time?" })).toMatchObject({ kind: "needs_input" });
+    expect(automationCommandDecisionSchema.parse({ kind: "unsupported", summary: "Not an automation" })).toMatchObject({ kind: "unsupported" });
+    expect(automationCommandDecisionSchema.safeParse({ ...decision, automation: { ...decision.automation, modelProfile: "provider-model" } }).success).toBe(false);
+    expect(automationCommandDecisionSchema.safeParse({ ...decision, lifecycleStatus: "succeeded" }).success).toBe(false);
+  });
 });
 
 describe("bounded durable context", () => {
@@ -136,6 +157,25 @@ describe("OpenAI Agents SDK boundary", () => {
     expect(scripted.firstCall?.request.tracing).toBe(false);
     expect(scripted.firstCall?.request.tools).toEqual([]);
     expect(scripted.firstCall?.request.input).toEqual([{ content: "{\"step\":1}", role: "user", type: "message" }]);
+  });
+
+  it("uses the separate strict intent-router output boundary for automation commands", async () => {
+    const decision = {
+      automation: {
+        completionMode: "continue",
+        goal: "Check daily",
+        modelProfile: "fast",
+        name: "Daily check",
+        schedule: "0 9 * * *",
+        timezone: "UTC",
+        toolPolicy: "browser-read"
+      },
+      kind: "automation_create"
+    };
+    const scripted = new ScriptedModel([[assistantMessage(JSON.stringify({ decision }))]]);
+    const transport = new OpenAIAgentsModelTransport("fake-api-key", provider(scripted));
+    await expect(transport.invoke({ context: "{}", modelId: "configured-fast", outputKind: "automation_command", role: "intent_router" })).resolves.toMatchObject({ output: decision });
+    expect(scripted.firstCall?.request.tools).toEqual([]);
   });
 
   it("classifies SDK, timeout, HTTP, network, and permanent failures safely", async () => {

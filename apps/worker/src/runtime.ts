@@ -9,6 +9,7 @@ export function createDurablePolling(
   options: {
     clock?: () => Date;
     executeRun?: (now: Date) => Promise<void>;
+    processCommand?: (now: Date) => Promise<void>;
     onError?: (error: unknown) => void;
     pollIntervalMs?: number;
   } = {}
@@ -32,6 +33,7 @@ export function createDurablePolling(
     polling = true;
     try {
       const now = clock();
+      await options.processCommand?.(now);
       await scheduleDueAutomations(database, now);
       await runState.recoverExpiredLeases(now);
       await options.executeRun?.(now);

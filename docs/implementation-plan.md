@@ -7,10 +7,15 @@ Autonomous Agent Platform. [`docs/design.md`](design.md) remains the product and
 architecture source of truth. If this plan conflicts with the design, the design
 wins unless the user approves an explicit architecture decision.
 
-Milestones 1–6 are COMPLETE and have been reviewed. Their architectural
-contracts below remain the historical and operational source of truth.
-Milestone 7 — Phase 1 Acceptance is NEXT / NOT STARTED and is the only currently
-authorized implementation milestone.
+Milestones 1–7 are COMPLETE. Their architectural contracts below remain the
+historical and operational source of truth. The verified acceptance evidence is
+recorded in [`docs/phase-1-acceptance.md`](phase-1-acceptance.md).
+
+- **Phase 1: COMPLETE**
+- **Phase 2: NOT STARTED / NOT AUTHORIZED**
+- **Phase 3: NOT STARTED / NOT AUTHORIZED**
+
+Completing Phase 1 does not authorize Phase 2 or Phase 3.
 
 ## Repository structure
 
@@ -328,7 +333,7 @@ named volumes. Verify `linux/amd64` and `linux/arm64` image builds.
    routing, durable context compilation, and deterministic escalation.
 6. **Product surfaces — COMPLETE** — command creation, automation review/editing, run and
    activity views, evidence, and human resume.
-7. **Phase 1 acceptance — NEXT / NOT STARTED** — complete fixture workflow, optional live smoke tests,
+7. **Phase 1 acceptance — COMPLETE** — complete fixture workflow, optional live smoke tests,
    restart/resume verification, clean-checkout setup, and all 25 design criteria.
 
 ## Testing and coverage
@@ -356,17 +361,14 @@ and clean artifacts in `finally`-style teardown. Calendar event deletion belongs
 only to this test harness. An unverified outcome is reported as `unknown` with
 manual cleanup instructions.
 
-## Milestone 7 handoff
+## Phase 1 completion handoff
 
-Milestones 1–6 are complete and reviewed. The contracts above for those milestones
-remain authoritative for their implemented behavior and operational guarantees.
-Milestone 7 is not started and is the only currently authorized implementation
-milestone. This documentation update does not begin its implementation.
+Milestones 1–7 and Phase 1 are complete. All 25 Phase 1 Definition of Done
+criteria pass; the exact matrix, deterministic fixture, restart/recovery,
+security, clean-checkout, portability, live-smoke boundary, and quality-gate
+evidence are recorded in [`docs/phase-1-acceptance.md`](phase-1-acceptance.md).
 
-The current handoff instruction is:
-
-> Implement Phase 1 Milestone 7 from `docs/implementation-plan.md`: Phase 1
-> Acceptance only. Validate the complete deterministic fixture workflow, restart
-> and resume behavior, clean-checkout setup, credential-gated smoke-test
-> boundaries, and all 25 Phase 1 Definition of Done criteria. Preserve the
-> completed Milestones 1–6 contracts and do not begin Phase 2 or Phase 3.
+The contracts above for all completed milestones remain authoritative. Phase 2
+and Phase 3 are **NOT STARTED / NOT AUTHORIZED**. Do not implement autonomous
+development, automated review, auto-merge, deployment automation, or
+self-improvement unless the user separately authorizes the applicable phase.

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   automationRuns,
   automations,
+  commandRequests,
   createDatabase,
   createRepositories,
   migrateDatabase,
@@ -22,7 +23,9 @@ import {
   createAgentRuntime,
   createDatabaseAgentRuntimePersistence,
   createConfiguredAgentExecutor,
+  createCommandProcessor,
   createRunState,
+  CommandLeaseError,
   InvalidRunTransitionError,
   RunLeaseError,
   scheduleDueAutomations,
@@ -59,7 +62,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query("truncate table automations cascade");
+  await pool.query("truncate table command_requests, automations cascade");
 });
 
 afterAll(async () => {
@@ -108,6 +111,184 @@ async function runsFor(automationId: string) {
     .where(eq(automationRuns.automationId, automationId))
     .orderBy(asc(automationRuns.createdAt));
 }
+
+const commandModels = {
+  balanced: "configured-balanced",
+  fast: "configured-fast",
+  reasoning: "configured-reasoning"
+} as const;
+
+function automationDecision(overrides: Record<string, unknown> = {}) {
+  return {
+    automation: {
+      completionMode: "continue",
+      goal: "Check the fixture and record the result",
+      modelProfile: "balanced",
+      name: "Natural-language fixture",
+      schedule: "0 9 * * *",
+      timezone: "UTC",
+      toolPolicy: "browser-read",
+      ...overrides
+    },
+    kind: "automation_create"
+  };
+}
+
+async function createCommand(content = "Every day, check the fixture") {
+  return createRepositories(database).createCommandRequest({ content });
+}
+
+describe("durable natural-language command processing", () => {
+  it("atomically creates an automation and completes the claimed command", async () => {
+    const command = await createCommand();
+    const contexts: string[] = [];
+    const processor = createCommandProcessor({
+      clock: () => new Date("2026-08-25T08:00:00.000Z"),
+      database,
+      models: commandModels,
+      transport: {
+        invoke: async (request) => {
+          contexts.push(request.context);
+          expect(request).toMatchObject({
+            modelId: "configured-fast",
+            outputKind: "automation_command",
+            role: "intent_router"
+          });
+          return { output: automationDecision(), usage: {} };
+        }
+      }
+    });
+
+    await expect(processor.processNext("command-worker")).resolves.toBe("completed");
+    const [stored] = await database.select().from(commandRequests).where(eq(commandRequests.id, command.id));
+    const [automation] = await database.select().from(automations);
+    expect(stored).toMatchObject({
+      claimedBy: null,
+      intentType: "automation_create",
+      status: "completed",
+      structuredResult: { automationId: automation!.id }
+    });
+    expect(automation).toMatchObject({
+      goal: "Check the fixture and record the result",
+      modelProfile: "balanced",
+      nextRunAt: new Date("2026-08-25T09:00:00.000Z"),
+      toolPolicy: "browser-read"
+    });
+    expect(contexts[0]).toContain("trusted_user_command");
+    await expect(processor.processNext("command-worker")).resolves.toBeUndefined();
+  });
+
+  it("recovers expired processing claims and fences the old processor", async () => {
+    await createCommand();
+    const first = createCommandProcessor({
+      clock: () => new Date("2026-08-25T08:00:00.000Z"),
+      database,
+      leaseDurationMs: 1_000,
+      models: commandModels
+    });
+    await expect(first.claim("old-worker", new Date("2026-08-25T08:00:00.000Z"))).resolves.toMatchObject({ status: "processing" });
+
+    const reclaimed = createCommandProcessor({
+      clock: () => new Date("2026-08-25T08:00:02.000Z"),
+      database,
+      models: commandModels,
+      transport: { invoke: async () => ({ output: automationDecision(), usage: {} }) }
+    });
+    await expect(reclaimed.processNext("new-worker")).resolves.toBe("completed");
+
+    await createCommand("Every hour, check again");
+    let advanced = false;
+    const stale = createCommandProcessor({
+      clock: () => advanced
+        ? new Date("2026-08-25T08:00:02.000Z")
+        : new Date("2026-08-25T08:00:00.000Z"),
+      database,
+      leaseDurationMs: 1_000,
+      models: commandModels,
+      transport: {
+        invoke: async () => {
+          advanced = true;
+          return { output: { kind: "needs_input", prompt: "Which hour?" }, usage: {} };
+        }
+      }
+    });
+    await expect(stale.processNext("old-worker")).rejects.toBeInstanceOf(CommandLeaseError);
+
+    await pool.query("truncate table command_requests, automations cascade");
+    await createCommand("Every day, create the fixture automation");
+    advanced = false;
+    const staleCreator = createCommandProcessor({
+      clock: () => advanced
+        ? new Date("2026-08-25T08:00:02.000Z")
+        : new Date("2026-08-25T08:00:00.000Z"),
+      database,
+      leaseDurationMs: 1_000,
+      models: commandModels,
+      transport: {
+        invoke: async () => {
+          advanced = true;
+          return { output: automationDecision(), usage: {} };
+        }
+      }
+    });
+    await expect(staleCreator.processNext("old-worker")).rejects.toBeInstanceOf(CommandLeaseError);
+  });
+
+  it("fails safely when model configuration, invocation, output, or scheduling is invalid", async () => {
+    const cases: Array<{ output?: unknown; throws?: boolean; expected: string }> = [
+      { expected: "openai_configuration_unavailable" },
+      { expected: "command_model_invocation_failed", throws: true },
+      { expected: "command_model_output_invalid", output: { kind: "invented" } },
+      { expected: "command_automation_schedule_invalid", output: automationDecision({ schedule: "0 9 * *" }) },
+      { expected: "command_automation_schedule_invalid", output: automationDecision({ schedule: "0 0 31 2 *" }) },
+      { expected: "command_automation_schedule_invalid", output: automationDecision({ timezone: "Not/AZone" }) }
+    ];
+    for (const item of cases) {
+      await createCommand();
+      const processor = createCommandProcessor({
+        database,
+        models: commandModels,
+        ...(item.output === undefined && !item.throws
+          ? {}
+          : {
+              transport: {
+                invoke: async () => {
+                  if (item.throws) throw new Error("private provider failure");
+                  return { output: item.output, usage: {} };
+                }
+              }
+            })
+      });
+      await expect(processor.processNext("worker")).resolves.toBe("failed");
+      const [stored] = await database
+        .select()
+        .from(commandRequests)
+        .orderBy(asc(commandRequests.createdAt));
+      expect(stored?.errorSummary).toBe(item.expected);
+      await pool.query("truncate table command_requests, automations cascade");
+    }
+    await expect(createCommandProcessor({ database, leaseDurationMs: 0, models: commandModels }).claim("worker", new Date())).rejects.toThrow("positive integer");
+  });
+
+  it("persists bounded needs-input and unsupported outcomes without creating automations", async () => {
+    const outcomes = [
+      { expected: "needs_input", output: { kind: "needs_input", prompt: "Which timezone?" } },
+      { expected: "failed", output: { kind: "unsupported", summary: "Immediate queries are not an automation" } }
+    ] as const;
+    for (const item of outcomes) {
+      await createCommand();
+      const processor = createCommandProcessor({
+        database,
+        knownSecrets: ["CANARY_COMMAND_SECRET"],
+        models: commandModels,
+        transport: { invoke: async () => ({ output: item.output, usage: {} }) }
+      });
+      await expect(processor.processNext("worker")).resolves.toBe(item.expected);
+      expect(await database.select().from(automations)).toHaveLength(0);
+      await pool.query("truncate table command_requests, automations cascade");
+    }
+  });
+});
 
 describe("durable due scheduling", () => {
   it("does nothing when there is no missed occurrence", async () => {

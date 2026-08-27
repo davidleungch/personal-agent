@@ -169,6 +169,16 @@ describe("deterministic Agent Runtime", () => {
       toStatus: "blocked"
     });
 
+    const readOnlyProgress = fixture({ definitions: [
+      definition("fixture.read"),
+      definition("fixture.write", "consequential")
+    ] });
+    readOnlyProgress.state.evidence = [];
+    readOnlyProgress.state.run.checkpoint = {
+      lastToolObservation: { status: "success", tool: "fixture.read" }
+    } as never;
+    await expect(readOnlyProgress.runtime.execute(runId, "worker")).resolves.toBe("blocked");
+
     const unresolved = fixture({ definitions: [definition("fixture.write", "consequential")] });
     unresolved.state.run.checkpoint = {
       pendingConsequentialOperation: {

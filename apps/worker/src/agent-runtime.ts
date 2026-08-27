@@ -240,18 +240,8 @@ function completedPostconditions(
   if (definitions.length === 0) return false;
 
   const allowedTools = new Set(definitions.map((definition) => definition.name));
-  const observation = state.run.checkpoint.lastToolObservation;
-  const successfulObservation =
-    typeof observation === "object" &&
-    observation !== null &&
-    !Array.isArray(observation) &&
-    observation.status === "success" &&
-    typeof observation.tool === "string" &&
-    allowedTools.has(observation.tool);
-
-  return (
-    successfulObservation ||
-    state.evidence.some((item) => item.tool !== undefined && allowedTools.has(item.tool))
+  return state.evidence.some(
+    (item) => item.tool !== undefined && allowedTools.has(item.tool)
   );
 }
 

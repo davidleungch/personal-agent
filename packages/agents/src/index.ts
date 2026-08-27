@@ -93,6 +93,38 @@ export const modelDecisionSchema = z.discriminatedUnion("kind", [
 ]);
 export type ModelDecision = z.infer<typeof modelDecisionSchema>;
 
+export const automationCommandDecisionSchema = z.discriminatedUnion("kind", [
+  z.object({
+    automation: z.object({
+      completionMode: z.enum(["continue", "stop_after_success"]),
+      goal: z.string().trim().min(1).max(8_000),
+      modelProfile: modelProfileSchema,
+      name: z.string().trim().min(1).max(200),
+      schedule: z.string().trim().min(1).max(200),
+      timezone: z.string().trim().min(1).max(100),
+      toolPolicy: z.enum([
+        "browser-interact",
+        "browser-read",
+        "calendar-read",
+        "calendar-write",
+        "course-registration",
+        "gmail-read",
+        "none"
+      ])
+    }).strict(),
+    kind: z.literal("automation_create")
+  }).strict(),
+  z.object({
+    kind: z.literal("needs_input"),
+    prompt: z.string().trim().min(1).max(2_000)
+  }).strict(),
+  z.object({
+    kind: z.literal("unsupported"),
+    summary: z.string().trim().min(1).max(2_000)
+  }).strict()
+]);
+export type AutomationCommandDecision = z.infer<typeof automationCommandDecisionSchema>;
+
 export type ModelMap = Readonly<Record<ModelProfile, string>>;
 
 const profileRank: Readonly<Record<ModelProfile, number>> = {
@@ -265,6 +297,7 @@ export type ModelUsage = Readonly<{
 export type ModelInvocationRequest = Readonly<{
   context: string;
   modelId: string;
+  outputKind?: "automation_command" | "runtime";
   role: AgentRole;
 }>;
 
@@ -309,6 +342,14 @@ const runtimeInstructions = [
   "The deterministic runtime owns all authority and executes tool decisions."
 ].join(" ");
 const sdkOutputSchema = z.object({ decision: modelDecisionSchema }).strict();
+const automationCommandInstructions = [
+  "Convert the trusted user command into one structured Phase 1 automation decision.",
+  "Use a standard five-field cron expression and an explicit IANA timezone.",
+  "Choose only a semantic model profile and the minimum listed tool policy.",
+  "Do not execute tools or include credentials, provider model IDs, lifecycle state, or audit fields.",
+  "If essential scheduling details are missing, request only the smallest missing input."
+].join(" ");
+const commandSdkOutputSchema = z.object({ decision: automationCommandDecisionSchema }).strict();
 
 export class OpenAIAgentsModelTransport implements ModelTransport {
   readonly #provider: ModelProvider;
@@ -319,13 +360,21 @@ export class OpenAIAgentsModelTransport implements ModelTransport {
   }
 
   async invoke(request: ModelInvocationRequest): Promise<ModelInvocationResult> {
-    const agent = new Agent({
-      instructions: runtimeInstructions,
-      model: request.modelId,
-      name: `Phase 1 ${request.role}`,
-      outputType: sdkOutputSchema,
-      tools: []
-    });
+    const agent = request.outputKind === "automation_command"
+      ? new Agent({
+          instructions: automationCommandInstructions,
+          model: request.modelId,
+          name: "Phase 1 intent router",
+          outputType: commandSdkOutputSchema,
+          tools: []
+        })
+      : new Agent({
+          instructions: runtimeInstructions,
+          model: request.modelId,
+          name: `Phase 1 ${request.role}`,
+          outputType: sdkOutputSchema,
+          tools: []
+        });
     const runner = new Runner({
       modelProvider: this.#provider,
       traceIncludeSensitiveData: false,
