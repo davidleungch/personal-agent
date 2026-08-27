@@ -1,12 +1,11 @@
 # Personal Autonomous Agent Platform
-## Final Design & Implementation Contract
+## Design & Implementation Contract — Revision 3
 
-**Status:** FINAL — implementation-ready source of truth  
+**Status:** ARCHITECTURE SOURCE OF TRUTH  
+**Revision:** v3 — ACT runtime preserved; EVOLVE runtime redesigned around a project-owned Development Harness with Pi as the initial coding-agent harness  
 **Primary user:** Single-user personal system  
-**Operating mode:** Active development, direct-to-production, automation-first  
-**Core idea:** The user provides goals, preferences, ideas, and high-level direction. The platform reasons, performs real-world actions through tools, runs persistent automations, and later evolves its own software capabilities when existing tools are insufficient.
-
-**Implementation priority:** prove the ACT runtime first. Self-development is deliberately deferred until the personal operator is already useful.
+**Operating mode:** Active development, automation-first, direct-to-production after deterministic quality gates  
+**Progress tracking:** implementation progress belongs in `docs/implementation-plan.md`; this document defines product intent, architecture, invariants, and phase boundaries.
 
 ---
 
@@ -14,400 +13,114 @@
 
 The project is a **Personal Autonomous Agent Platform** with three first-class capabilities:
 
-1. **THINK** — answer questions, research, reason, plan, and discuss ideas with the user.
-2. **ACT** — perform real-world actions using tools such as a browser, Gmail, Google Calendar, APIs, shell commands, and scheduled automations.
-3. **EVOLVE** — modify its own codebase through an autonomous software-development loop when a desired capability cannot be implemented reliably using existing tools.
+1. **THINK** — research, reason, discuss, plan, and help the user make decisions.
+2. **ACT** — execute real-world workflows through controlled tools such as Browser, Gmail, Google Calendar, APIs, and scheduled automations.
+3. **EVOLVE** — implement, review, test, merge, deploy, and later propose software changes that improve the platform itself.
 
-The platform is not designed around one long-running LLM conversation. Long-term state lives in durable system data: PostgreSQL, Git history, architecture documentation, task records, automation definitions, run history, and stored decisions. Every agent execution can therefore be **fresh, isolated, and disposable**.
+The platform is not a single long-lived chat session. Durable state lives in PostgreSQL, Git history, repository documentation, ADRs, automation definitions, workflow checkpoints, tool-call/evidence records, development-task records, and CI/deployment records.
 
-The system uses a deterministic **Control Plane** to manage scheduling, workflow state, permissions, retries, tool access, model selection, budgets, and verification. Models provide intelligence, but they do not own authority or persistent workflow state.
+Model sessions are temporary compute. They may be created, compacted, resumed for a bounded task, abandoned, or lost without becoming the authoritative source of workflow state.
 
-The main operating principle is:
+The system has one governing rule:
 
-> **LLMs decide what should be done next; deterministic code decides whether the action is allowed, whether it has already happened, whether it succeeded, whether it should be retried, and when the workflow is complete.**
+> **Models provide intelligence. Deterministic control-plane code owns authority, persistence, permissions, verification, success criteria, retries, merge policy, and deployment policy.**
 
-## 1.1 Final Decisions
+Revision 3 introduces a second execution harness for software development:
 
-The following decisions are intentionally fixed for the first implementation and should not be changed by an implementation agent without an explicit architecture decision:
+- **ACT Runtime:** the existing controlled action-agent runtime using the OpenAI Agents SDK behind project-owned interfaces and the Tool Gateway.
+- **EVOLVE Runtime:** a project-owned `DevelopmentHarness` abstraction whose first implementation uses the **Pi Coding Agent SDK** for coding-agent sessions, context compaction, model interaction, and agent-loop mechanics.
 
-- **Single-user system.** Optimize for one trusted owner, not enterprise multi-tenancy.
-- **TypeScript-first monorepo.** Platform and orchestration code are TypeScript. Python may be introduced later only for workloads where its ecosystem provides a clear advantage, such as quantitative research or ML.
-- **One small runtime.** Start with PostgreSQL, one application process, and one worker process.
-- **Automation-first.** Build a useful personal operator before building self-development.
-- **Direct to production.** No staging or canary environment in the initial system.
-- **Persistent state, disposable model sessions.** PostgreSQL and Git hold state; LLM sessions may die at any time.
-- **Deterministic authority.** Models never own workflow state, credentials, permissions, retries, scheduling, or success criteria.
-- **Existing primitives before custom infrastructure.** Use maintained SDKs/libraries for agent loops, browser automation, APIs, and protocols instead of reimplementing them.
-- **100% coverage is a hard merge gate** for owned executable code, across statements, branches, functions, and lines.
-- **Independent automated code review** is required before automatic merge once Phase 2 is implemented.
-- **No framework proliferation.** Do not introduce Redis, Temporal, Kafka, Kubernetes, LangGraph, or a new microservice unless a concrete limitation justifies it.
-
-## 1.2 Implementation Order
-
-The project is bootstrapped in three stages:
-
-```text
-Stage 0 — Manual development bootstrap
-User + Codex build the platform
-
-Stage 1 — ACT runtime
-Chat → Automation → Scheduler → Agent → Browser/Gmail/Calendar → verified result
-
-Stage 2 — EVOLVE runtime
-Platform can create development tasks → invoke coding agent → independent review → CI → auto-merge → deploy
-
-Stage 3 — Self-improvement
-Operational failures/capability gaps can propose or initiate development work under policy
-```
-
-**Only Stage 1 / Phase 1 is the initial implementation target.** Phase 2 and Phase 3 architecture must be preserved, but their runtime should not be implemented until Phase 1 Definition of Done is satisfied.
-
-The platform is intentionally optimized for a **single-user personal environment under active development**. It therefore avoids unnecessary enterprise infrastructure. There is no mandatory staging environment, canary rollout, Kubernetes, Kafka, Temporal, or Redis in the initial implementation. Changes that pass automated review and CI are merged and deployed directly to the live personal system.
+Pi does **not** replace the ACT runtime and does **not** become the platform control plane.
 
 ---
 
-# 2. Product Vision
+# 2. Fixed Architectural Decisions
 
-The desired interaction model is closer to a persistent personal operator than to a conventional dashboard or chatbot.
+The following decisions are normative and may not be silently changed by an implementation agent.
 
-The user should be able to say things such as:
+## 2.1 Product and Runtime Scope
 
-- “Every day, check whether a suitable evening SUA Advanced Rating course near Tsuen Wan has opened. If it has, register me and add the confirmed session to Google Calendar.”
-- “Monitor Van Gogh Pikachu PSA 10 prices and only notify me when the long-term entry looks materially attractive.”
-- “Every morning, check whether anything material changed in the IONQ thesis.”
-- “Add PSA population history to the Pokémon card page.”
-- “This browser workflow is unreliable. Build a dedicated tool for it.”
+- Single trusted user.
+- TypeScript-first monorepo.
+- PostgreSQL is the durable workflow authority.
+- Git is the source-code history authority.
+- Repository documentation and ADRs are architecture/product authority.
+- The user owns vision, goals, preferences, subjective judgment, and major product direction.
+- Models never own credentials, permissions, scheduling, workflow state, retry policy, completion criteria, merge policy, or deployment policy.
+- Phase 1 ACT remains independent from the Phase 2 development harness.
+- Direct-to-production is acceptable after the development pipeline is proven and deterministic quality gates pass.
+- No mandatory staging or canary environment initially.
 
-The system should determine whether the request is:
+## 2.2 Infrastructure Restraint
 
-- an immediate information query,
-- an executable action,
-- a recurring automation,
-- a planning discussion,
-- or a software capability change.
+Do not add any of the following without a concrete, demonstrated limitation:
 
-The user does not need to write implementation prompts, manually manage sessions, review ordinary pull requests, or repeatedly configure cron jobs. The platform converts human-level intent into structured, executable work.
-
----
-
-# 3. Design Goals
-
-## 3.1 Primary Goals
-
-The platform should:
-
-- accept natural-language goals and commands;
-- support interactive planning before major product or architecture changes;
-- execute real-world tasks through connected tools;
-- persist recurring and conditional automations;
-- resume safely after crashes or restarts;
-- connect browser, email, calendar, APIs, Git, shell, and custom tools behind a unified interface;
-- choose models according to task type, complexity, reliability, latency, and cost;
-- restrict each agent run to only the capabilities required for that task;
-- verify external side effects rather than assuming a tool call succeeded;
-- autonomously implement, review, test, merge, and deploy software changes;
-- enforce **100% test coverage** on owned executable code before merge;
-- learn operationally by turning repeated failures or missing capabilities into improvement proposals or development tasks.
-
-## 3.2 Non-Goals for the Initial Version
-
-The first version does **not** need:
-
-- multi-user tenancy;
-- enterprise RBAC;
-- Kubernetes;
+- Redis;
+- Temporal;
 - Kafka;
-- Redis unless queue pressure later justifies it;
-- Temporal unless genuinely long-running durable workflows become difficult to manage with PostgreSQL state;
-- a separate staging environment;
-- canary releases;
-- a complex rollback platform;
-- a large multi-agent framework for every workflow;
-- a dedicated microservice for every component;
-- a custom integration for every website.
+- Kubernetes;
+- LangGraph;
+- a general-purpose workflow framework;
+- an enterprise observability platform;
+- a large microservice decomposition;
+- a multi-agent “society” framework.
 
-The system should begin with a small, comprehensible runtime and add infrastructure only after a concrete limitation appears.
+Use ordinary TypeScript state machines plus PostgreSQL until a real requirement proves insufficient.
 
----
+## 2.3 Quality
 
-# 4. Core Architectural Principles
-
-## 4.1 Persistent State, Disposable Agents
-
-No workflow depends on keeping one model session alive.
-
-Persistent memory lives in:
-
-- PostgreSQL;
-- Git history;
-- architecture documentation;
-- ADRs and project decisions;
-- automation definitions;
-- task definitions;
-- agent-run records;
-- tool-call records;
-- execution evidence;
-- user-configured policies;
-- operational logs.
-
-An agent run is temporary compute:
+Owned executable code has a hard merge gate of:
 
 ```text
-spawn
-  ↓
-load durable state
-  ↓
-compile context
-  ↓
-reason and act
-  ↓
-persist results
-  ↓
-exit
+Statements: 100%
+Branches:   100%
+Functions:  100%
+Lines:      100%
 ```
 
-If the machine restarts, a new agent can continue from the persisted workflow state.
+Coverage is necessary but not sufficient. Tests must assert meaningful behavior and system invariants.
 
-## 4.2 Intelligence Is Not Authority
+## 2.4 Framework Encapsulation
 
-The LLM may propose the next action, but all side effects go through deterministic policy and validation.
+External frameworks and providers sit behind project-owned interfaces.
+
+Current intended mappings:
 
 ```text
-Model proposes tool call
-        ↓
-Schema validation
-        ↓
-Capability / permission check
-        ↓
-Precondition check
-        ↓
-Idempotency check
-        ↓
-Execute
-        ↓
-Postcondition verification
-        ↓
-Persist result
+ActionAgentRuntime      -> OpenAI Agents SDK
+DevelopmentHarness     -> Pi Coding Agent SDK
+BrowserAdapter         -> Playwright
+GmailAdapter           -> Google Gmail API
+CalendarAdapter        -> Google Calendar API
+Persistence            -> PostgreSQL + Drizzle
+CI                     -> GitHub Actions
+Deployment             -> Git + Docker Compose
 ```
 
-## 4.3 Prefer Existing Tools Before Writing New Code
+No framework is allowed to become the durable domain model.
 
-The platform should escalate through three levels:
+---
 
-### Level 1 — Use existing tools directly
+# 3. Product Vision
 
-If a browser, API, Gmail, Calendar, shell, or existing internal tool can complete the task reliably, use it.
+The desired product behaves like a persistent personal operator.
 
-### Level 2 — Create a reusable automation
-
-If the goal is recurring or conditional, store the workflow as an automation definition and run it on schedule or on demand.
-
-### Level 3 — Develop a new capability
-
-Only when the generic tool path is too slow, unreliable, repetitive, or impossible should the system propose or build a dedicated tool or feature.
-
-This prevents every new user request from becoming a software-development project.
-
-## 4.4 Direct-to-Production Development
-
-This is a single-user system under active development.
-
-The software loop is therefore:
+Examples:
 
 ```text
-code
-  ↓
-independent review
-  ↓
-CI + 100% coverage
-  ↓
-auto-merge
-  ↓
-direct deploy
-  ↓
-run
+"Every day, check whether a suitable evening SUA course has opened.
+If it has, register me, verify the registration, and add it to Calendar."
+
+"Monitor this collectible and only notify me when the long-term entry is attractive."
+
+"Every morning, check whether the investment thesis materially changed."
+
+"This browser workflow keeps failing. Propose a dedicated adapter."
+
+"Add a new product feature to the personal agent."
 ```
 
-There is no mandatory staging or canary layer. If something breaks, the system creates or executes a fix task and iterates quickly.
-
----
-
-# 5. High-Level Architecture
-
-```text
-                              USER
-                               │
-                               ▼
-                       Chat / Command UI
-                               │
-                               ▼
-                        Intent Router
-                               │
-             ┌─────────────────┼──────────────────┐
-             ▼                 ▼                  ▼
-           QUERY          AUTOMATION          DEV CHANGE
-             │                 │                  │
-             └─────────────────┼──────────────────┘
-                               ▼
-                    ┌─────────────────────┐
-                    │    CONTROL PLANE    │
-                    │                     │
-                    │ Workflow state      │
-                    │ Scheduler           │
-                    │ Model router        │
-                    │ Capability resolver │
-                    │ Tool policy         │
-                    │ Retry logic         │
-                    │ Budget controls     │
-                    │ Audit trail         │
-                    └──────────┬──────────┘
-                               │
-                 ┌─────────────┴─────────────┐
-                 ▼                           ▼
-          MODEL / AGENT LAYER           TOOL GATEWAY
-                 │                           │
-      ┌──────────┼───────────┐      ┌────────┼───────────────┐
-      ▼          ▼           ▼      ▼        ▼               ▼
-   General    Planner      Coder   Browser  Gmail          Calendar
-    Agent       Agent       Agent      │       │               │
-      │                      │         ▼       ▼               ▼
-      │                   Reviewer  Playwright Google API   Google API
-      │
-      └──────────────────────────────────────────────┐
-                                                     │
-                                                     ▼
-                                              Real-world actions
-
-                         DEVELOPMENT / EVOLUTION LOOP
-
-        Missing capability / approved feature / recurring failure
-                               │
-                               ▼
-                            Task DB
-                               │
-                               ▼
-                        Agent Supervisor
-                               │
-                               ▼
-                         Context Compiler
-                               │
-                               ▼
-                           Coder Agent
-                               │
-                               ▼
-                              PR
-                         ┌─────┴─────┐
-                         ▼           ▼
-                    Reviewer        CI
-                         └─────┬─────┘
-                               ▼
-                         Quality Gate
-                               │
-                               ▼
-                           Auto Merge
-                               │
-                               ▼
-                         Direct Deploy
-```
-
----
-
-# 6. Final Technology Stack
-
-The initial repository uses a deliberately narrow TypeScript-first stack.
-
-| Area | Decision |
-|---|---|
-| Language | TypeScript |
-| Runtime | Current Node.js LTS, pinned at repository bootstrap |
-| Package manager | pnpm workspaces |
-| Web app / UI | Next.js + React + TypeScript |
-| Worker | Plain Node.js TypeScript process |
-| Database | PostgreSQL |
-| ORM / migrations | Drizzle ORM |
-| Agent harness | OpenAI Agents SDK for TypeScript behind internal interfaces |
-| Runtime validation | Zod |
-| Browser automation | Playwright |
-| Google integration | Gmail API + Google Calendar API through `googleapis` or equivalent official client |
-| Unit/integration tests | Vitest |
-| Browser / E2E tests | Playwright |
-| CI | GitHub Actions |
-| Local deployment | Docker Compose |
-| Source control | Git + GitHub |
-
-## 6.1 TypeScript-First, Not TypeScript-Only
-
-TypeScript is the platform language because the MVP is primarily orchestration, web UI, APIs, browser automation, scheduling, state management, and tool integration. Shared TypeScript types should be reused across app, worker, tools, and database boundaries.
-
-Python is allowed later for domain-specific workloads where it materially improves implementation quality or ecosystem access, for example:
-
-- quantitative research;
-- backtesting;
-- scientific computing;
-- large-scale dataframe processing;
-- ML / model training.
-
-Python must not be introduced merely to add another agent framework or queue.
-
-## 6.2 Assemble, Do Not Rebuild the Ecosystem
-
-The implementation should use existing maintained primitives for generic infrastructure:
-
-- Agents SDK for model/tool execution loops and structured tool calls;
-- Playwright for browser control;
-- Google APIs for Gmail and Calendar;
-- MCP only where an external integration is naturally exposed through MCP;
-- GitHub Actions for CI;
-- Git / worktrees for isolated code changes.
-
-OpenClaw is an architectural reference for persistent personal-agent automation. The project may adopt a useful component if it cleanly fits behind an internal interface, but Phase 1 must not become dependent on replacing or reimplementing OpenClaw wholesale.
-
-All external frameworks sit behind project-owned interfaces so they can be replaced without rewriting business logic.
-
----
-
-# 7. User Plane and System Plane
-
-## 7.1 User Plane
-
-The user-facing product should remain simple.
-
-Primary surfaces:
-
-- **Chat / Command** — main interaction surface;
-- **Automations** — list of recurring or conditional jobs, statuses, and last results;
-- **Activity / History** — what the agent did and why;
-- **Domain modules** — optional dedicated views for data-heavy areas such as IONQ, Pokémon, markets, or travel;
-- **Development status** — optional view showing feature work, failures, retries, and deployments.
-
-The user should not need to interact with internal task IDs, worktrees, CI jobs, or model sessions during normal use.
-
-## 7.2 System Plane
-
-The system plane contains:
-
-- Control Plane;
-- Scheduler;
-- Task DB;
-- Model Router;
-- Context Compiler;
-- Tool Registry / Tool Gateway;
-- Agent Supervisor;
-- Coder and Reviewer agents;
-- CI and quality gates;
-- Git / GitHub integration;
-- direct deployment logic;
-- structured logs and run history.
-
-The system plane modifies and extends the user plane over time.
-
----
-
-# 8. Request and Intent Routing
-
-Every user input first becomes a typed intent.
-
-Initial intent types:
+The system classifies requests into domains such as:
 
 ```text
 QUERY
@@ -420,182 +133,235 @@ DEVELOPMENT_FIX
 SYSTEM_COMMAND
 ```
 
-Examples:
-
-```text
-"What changed in IONQ today?"
-→ QUERY
-
-"Add this confirmed course to my calendar."
-→ ACTION
-
-"Every day, check for an evening VTC SUA course and register me if one opens."
-→ AUTOMATION_CREATE
-
-"Add PSA population history to the Pokémon detail page."
-→ PRODUCT_CHANGE
-```
-
-The router should return structured output. It should not directly execute external side effects.
+The user should not need to manually manage cron syntax for ordinary requests, long-lived LLM sessions, coding-agent context, worktrees, review sessions, CI retries, routine merges, or routine deployments.
 
 ---
 
-# 9. Control Plane
+# 4. Core Principles
 
-The Control Plane is the authority layer of the system.
+## 4.1 Persistent State, Disposable Sessions
 
-It owns:
-
-- workflow state;
-- scheduling;
-- retry classification;
-- model selection;
-- capability exposure;
-- tool permissions;
-- tool-call validation;
-- idempotency;
-- budgets and rate limits;
-- run cancellation;
-- evidence recording;
-- completion criteria.
-
-A model can request an action, but the Control Plane decides whether the request can execute.
-
-## 9.1 Control Plane Rule
+No workflow depends on a model remembering prior turns.
 
 ```text
-LLM decides:
-- what should happen next?
-- what information is missing?
-- which permitted tool is appropriate?
-
-Code decides:
-- is the action allowed?
-- has it already happened?
-- are required preconditions satisfied?
-- did it actually succeed?
-- is retry safe?
-- which model profile is used?
-- how much may this run spend?
-- when does the workflow terminate?
+durable state
+    ↓
+compile bounded context
+    ↓
+fresh execution
+    ↓
+reason / act
+    ↓
+persist validated result
+    ↓
+session may end
 ```
+
+If a process or model session disappears, a new execution reconstructs the workflow from durable state.
+
+## 4.2 Intelligence Is Not Authority
+
+A model may propose a tool call, a plan, code, a review finding, completion, or a development task.
+
+Deterministic code decides whether the action is allowed, whether it is authorized for this run, whether it has already happened, whether the current executor still owns the lease, whether external success is proven, whether retry is safe, whether a run is complete, whether code may merge, and whether a deployment is accepted.
+
+## 4.3 Semantic Ownership Remains Human/Deterministic
+
+AI may propose specifications, architecture, tests, and policies, but it may not silently redefine user-owned invariants or acceptance semantics.
+
+Autonomous implementation begins only when the governing constraints are explicit enough to verify mechanically or have been explicitly approved by the user.
+
+## 4.4 Existing Primitive Before Custom Infrastructure
+
+Use maintained libraries for generic mechanics.
+
+Build custom code for the platform-specific value:
+
+- personal state;
+- durable policies;
+- domain workflows;
+- context selection;
+- tool permission rules;
+- completion validators;
+- development-task policy;
+- independent review policy;
+- self-improvement policy.
 
 ---
 
-# 10. Tool Architecture
-
-## 10.1 Unified Tool Registry
-
-Agents should not know whether a capability is implemented through REST, MCP, Playwright, a local library, or a subprocess.
-
-They see a typed registry such as:
+# 5. High-Level Architecture
 
 ```text
-web.search
-web.open
-
-browser.open
-browser.read
-browser.click
-browser.type
-browser.select
-browser.upload
-browser.submit
-
- Gmail.search
-Gmail.read
-Gmail.wait_for_message
-
-calendar.list_events
-calendar.create_event
-calendar.update_event
-
-shell.run
-
-git.diff
-git.commit
-git.push
-
-automation.create
-automation.disable
-
-task.create
+                                  USER
+                                   │
+                                   ▼
+                           Chat / Command UI
+                                   │
+                                   ▼
+                              Intent Router
+                                   │
+                ┌──────────────────┼──────────────────┐
+                │                  │                  │
+              THINK               ACT               EVOLVE
+                │                  │                  │
+                │                  │                  ▼
+                │                  │          Development Coordinator
+                │                  │                  │
+                └──────────┬───────┘                  │
+                           ▼                          │
+                    CONTROL PLANE                    │
+                           │                          │
+          ┌────────────────┼────────────────┐         │
+          │                │                │         │
+      Scheduler       State/Leases      Policies      │
+      Model Router    Idempotency       Budgets       │
+      Completion      Audit/Evidence    Recovery      │
+          │                                             │
+          ├──────────────────────────────┐              │
+          ▼                              ▼              ▼
+  ACTION AGENT RUNTIME              TOOL GATEWAY   DEVELOPMENT HARNESS
+  OpenAI Agents SDK                      │              │
+  fresh execution                         │              ▼
+          │                               │          Pi Adapter
+          │                       ┌───────┼───────┐      │
+          │                       ▼       ▼       ▼      ▼
+          │                    Browser  Gmail  Calendar  Pi SDK
+          │                                             │
+          │                                      custom sandbox tools
+          │                                             │
+          │                                             ▼
+          │                                    ISOLATED DEV SANDBOX
+          │                                    repo/worktree only
+          │                                             │
+          └─────────────────────────────────────────────┘
 ```
 
-Each tool has:
-
-- typed input schema;
-- typed output schema;
-- permission class;
-- timeout;
-- retry policy;
-- side-effect classification;
-- optional idempotency support;
-- optional verification hook.
-
-## 10.2 Tool Adapters
-
-### Browser Adapter
-
-Implementation: controlled browser session, preferably Playwright-backed.
-
-Use for:
-
-- websites without suitable APIs;
-- form filling;
-- registration workflows;
-- page extraction;
-- navigation;
-- ordinary web interactions.
-
-### Gmail Adapter
-
-Use a direct Gmail API / connector path where possible.
-
-Capabilities include:
-
-- search messages;
-- read messages;
-- wait for confirmation messages;
-- extract confirmation numbers or dates.
-
-### Google Calendar Adapter
-
-Use the Calendar API rather than browser automation.
-
-Capabilities include:
-
-- list events;
-- create event;
-- update event;
-- check for duplicates.
-
-### Git Adapter
-
-Provides controlled access to:
-
-- branches;
-- worktrees;
-- diffs;
-- commits;
-- pushes;
-- pull requests.
-
-### Shell Adapter
-
-Restricted local execution for development and system maintenance.
-
-### MCP Adapters
-
-MCP can be used as a standard integration path for compatible external tools, but the platform does not require every tool to be MCP-based.
-
-The Tool Registry hides the underlying transport from agents.
+The two agent runtimes share the same control philosophy but have different threat models.
 
 ---
 
-## 10.3 Unified Tool Result Contract
+# 6. Technology Stack
 
-Every tool call returns a normalized result. Business logic must not infer success from an exception-free function call.
+| Area | Decision |
+|---|---|
+| Language | TypeScript |
+| Runtime | Pinned Node.js LTS/current project version |
+| Package manager | pnpm workspaces |
+| Web app | Next.js + React + TypeScript |
+| Main worker | Plain Node.js TypeScript |
+| Database | PostgreSQL |
+| ORM/migrations | Drizzle ORM |
+| ACT agent harness | OpenAI Agents SDK behind internal abstraction |
+| EVOLVE development harness | Project-owned `DevelopmentHarness`; initial adapter: Pi Coding Agent SDK |
+| Runtime schemas | Zod |
+| Browser automation | Playwright |
+| Gmail / Calendar | Official Google APIs |
+| Unit/integration tests | Vitest |
+| Browser/E2E tests | Playwright |
+| CI | GitHub Actions |
+| Local runtime | Docker Compose |
+| Development isolation | Ephemeral container/VM-style sandbox managed outside the app Compose trust boundary |
+| Source control | Git + GitHub |
+
+TypeScript is preferred for orchestration. Python may be introduced later only when a domain workload clearly benefits, such as quant research or scientific computing.
+
+---
+
+# 7. Sources of Truth
+
+Authority is deliberately split:
+
+```text
+PostgreSQL
+= workflow truth
+
+Git
+= source-code and revision truth
+
+docs/design.md
+= architecture/product truth
+
+docs/implementation-plan.md
+= approved execution plan + current implementation status
+
+ADRs
+= approved architecture changes
+
+CI results
+= mechanical quality evidence
+
+Pi sessions / ACT model sessions
+= disposable execution context only
+```
+
+No session file, compaction summary, conversation log, or model response may override the sources above.
+
+---
+
+# 8. Phase 1 — ACT Runtime Contract
+
+Phase 1 is the personal-operator runtime. It remains architecturally separate from Pi.
+
+## 8.1 Runtime Topology
+
+Steady state:
+
+```text
+app ──────┐
+           ├── PostgreSQL
+worker ───┘
+```
+
+A one-shot migration container is permitted but is not a continuously running service.
+
+The base runtime must start without OpenAI or Google credentials. Missing integrations are `unavailable`, not health failures.
+
+## 8.2 Scheduler
+
+The scheduler is deterministic and PostgreSQL-backed.
+
+Rules:
+
+- standard five-field cron;
+- explicit IANA timezone;
+- canonical timestamps stored in UTC;
+- default timezone from user configuration;
+- polling is only a wake mechanism;
+- `FOR UPDATE SKIP LOCKED` or equivalent transactional claiming;
+- unique `(automation_id, scheduled_for)`;
+- no overlapping active run for the same automation by default;
+- after downtime, catch up at most one run;
+- the most recent eligible missed occurrence is used;
+- default missed-run relevance window is 24 hours;
+- never replay every missed occurrence.
+
+## 8.3 Lease Heartbeat and Fencing
+
+A lease timeout alone is not sufficient for correctness.
+
+Long-running valid model/tool executions use heartbeat renewal.
+
+Consequential persistence is fenced so that:
+
+```text
+old worker owns lease generation N
+        ↓
+lease expires
+        ↓
+new worker claims generation N+1
+        ↓
+old async operation returns
+        ↓
+write with generation N rejected
+```
+
+A stale executor must not mutate authoritative state after reclamation.
+
+## 8.4 Tool Gateway
+
+All real-world actions flow through the Tool Gateway.
+
+Each tool definition includes:
 
 ```ts
 type ToolStatus = "success" | "failed" | "unknown";
@@ -608,792 +374,477 @@ type ToolResult<T> = {
   retryable: boolean;
   failureClass?: FailureClass;
 };
-```
 
-`unknown` is a first-class state. It means the external action may have succeeded but the platform cannot yet prove the outcome. Consequential actions in `unknown` state must enter verification before any retry.
-
-Example:
-
-```text
-registration submit times out
-        ↓
-status = unknown
-        ↓
-check account / confirmation page / email
-        ↓
-confirmed? → success
-not confirmed with evidence? → safe retry if policy allows
-```
-
----
-
-# 11. Capability Resolution and Least-Privilege Tool Exposure
-
-An agent should never receive every tool available in the system.
-
-Before a run, the Capability Resolver determines the minimal tool set required by the task.
-
-Example:
-
-```text
-Task: "What changed in IONQ today?"
-
-Allowed:
-- web.search
-- web.open
-- thesis.read
-
-Not exposed:
-- Gmail
-- Calendar
-- shell
-- Git
-- browser form submission
-```
-
-Example:
-
-```text
-Task: "Register me for this course and add it to Calendar."
-
-Allowed:
-- browser navigation / form tools
-- Gmail search/read
-- Calendar create
-
-Not exposed:
-- Git merge
-- arbitrary shell
-- unrelated finance tools
-```
-
-This reduces accidental misuse and limits prompt-injection blast radius.
-
----
-
-# 12. Model Architecture and Model Routing
-
-Models are interchangeable execution engines behind role-based interfaces.
-
-The application should not scatter hard-coded model names throughout business logic.
-
-## 12.1 Model Roles
-
-Recommended logical profiles:
-
-```text
-ROUTER
-- fast
-- low cost
-- strong structured-output reliability
-
-EXTRACTOR
-- fast
-- low cost
-- schema-oriented
-
-GENERAL_AGENT
-- strong reasoning
-- strong tool use
-- suitable for open-ended personal tasks
-
-PLANNER
-- strong reasoning
-- architecture and requirements discussion
-
-CODER
-- coding-specialized model / coding agent
-
-REVIEWER
-- independent fresh model/session
-- strong reasoning and code understanding
-```
-
-## 12.2 Deterministic Model Router
-
-The Control Plane selects the model based on:
-
-- task type;
-- complexity;
-- risk;
-- required tools;
-- past success rate;
-- schema adherence;
-- latency;
-- cost;
-- context size.
-
-The model does **not** choose its own replacement.
-
-## 12.3 Escalation Policy
-
-Simple tasks should begin with a cheaper profile.
-
-```text
-cheap / fast model
-       ↓ failure
-retry once if appropriate
-       ↓ failure
-stronger reasoning model
-       ↓ failure
-specialized model or human escalation
-```
-
-Different failure types have different responses. A network timeout should not trigger a more expensive reasoning model.
-
-## 12.4 Continuous Model Evaluation
-
-The system should collect per-profile metrics:
-
-- task success rate;
-- tool-call success rate;
-- malformed-output rate;
-- number of retries;
-- latency;
-- token / monetary cost;
-- human corrections;
-- reviewer rejection rate for coding tasks.
-
-Model selection can later be updated from observed performance rather than preference or marketing claims.
-
----
-
-# 13. Scheduler and Automation System
-
-Cron is only a wake-up mechanism. The automation definition contains the actual goal and policy.
-
-## 13.1 Automation Definition
-
-Example:
-
-```json
-{
-  "id": "AUTO-001",
-  "name": "VTC SUA Registration",
-  "schedule": "0 9 * * *",
-  "goal": "Find a suitable evening SUA Advanced Rating course near Tsuen Wan. Register when eligible and available, then add the confirmed session to Google Calendar.",
-  "enabled": true,
-  "modelProfile": "GENERAL_AGENT",
-  "toolPolicy": "course-registration",
-  "completionMode": "stop_after_success"
+interface ToolDefinition<Input, Output> {
+  name: string;
+  inputSchema: ZodType<Input>;
+  outputSchema: ZodType<Output>;
+  permission: PermissionClass;
+  sideEffect: SideEffectClass;
+  timeoutMs: number;
+  retryPolicy: RetryPolicy;
+  idempotencyKey?: (input: Input) => string;
+  verify?: VerificationHook<Input, Output>;
+  execute(input: Input, context: ToolExecutionContext): Promise<ToolResult<Output>>;
 }
 ```
 
-## 13.2 Scheduler Responsibilities
+The Gateway owns tool lookup, capability checks, permission checks, schema validation, idempotency reservation, timeout classification, verification, retry safety, audit persistence, evidence validation, and secret-safe summaries.
 
-The scheduler only:
+## 8.5 `unknown` Is a First-Class State
 
-1. finds due automations;
-2. creates an `AutomationRun`;
-3. places it into executable state;
-4. updates `nextRunAt`.
+A timeout does not imply failure.
 
-The scheduler itself performs no reasoning.
-
-## 13.3 Scheduler Semantics
-
-The scheduler must behave predictably across restarts and duplicate wakeups.
-
-Initial rules:
-
-- store canonical timestamps in **UTC**;
-- each automation has an explicit IANA timezone, defaulting to the user-configured timezone;
-- the same automation may not have overlapping active runs unless a future automation explicitly opts in;
-- a missed run caused by downtime is executed once after recovery when still relevant;
-- claiming a due run is transactional;
-- `(automation_id, scheduled_for)` is unique to prevent duplicate scheduled runs;
-- scheduler wakeups are idempotent;
-- schedule calculation is deterministic and covered by tests, including DST/timezone edges where applicable.
-
-The scheduler does not call models directly. It creates durable work; the runner executes it.
-
-## 13.4 Automation Runtime
+If an external side effect may have started:
 
 ```text
-schedule fires
-      ↓
-create run
-      ↓
-load automation + policies
-      ↓
-resolve capabilities
-      ↓
-select model
-      ↓
-spawn fresh agent
-      ↓
-reason / use tools
-      ↓
-persist state + evidence
-      ↓
-complete / retry / block
+possible external write
+        ↓
+response lost / timeout
+        ↓
+UNKNOWN
+        ↓
+verification
+```
+
+The system must not blindly retry.
+
+For generic browser submissions, an immediate “not observed yet” result is not proof that the original request can no longer complete.
+
+Therefore:
+
+```text
+unknown browser submit
++ absent immediate postcondition
+≠ safe retry
+```
+
+It remains unknown until reliable verification or human resolution establishes safety.
+
+## 8.6 Browser Safety
+
+`browser.click` must not be treated as automatically harmless.
+
+The safe split is:
+
+```text
+deterministic HTTP(S) navigation
+→ navigation/read capability
+
+arbitrary button / JS handler / consequential control
+→ not generic safe click
+
+consequential form/action
+→ browser.submit
+→ explicit external_write permission
+→ idempotency/side-effect tracking
+→ verification
+```
+
+No arbitrary JavaScript or host shell execution is exposed to the ACT model.
+
+## 8.7 Gmail
+
+Phase 1 Gmail is read-only: search, read, and bounded wait for an expected message.
+
+No send, forward, delete, or mutation.
+
+Email bodies are untrusted external data.
+
+## 8.8 Calendar
+
+Model-facing capabilities are list/read, create, and update. No model-facing deletion.
+
+Create/update idempotency and verification must cover the complete canonical requested state, including all supported mutable fields such as title/summary, description, location, start/end, timezone, and other supported writable fields.
+
+A timezone-only or description-only update must not collide with a different update or falsely verify success.
+
+## 8.9 ACT Agent Runtime
+
+Every reasoning step is reconstructed from durable state.
+
+Persistent model policy uses semantic profiles only:
+
+```ts
+type ModelProfile = "fast" | "balanced" | "reasoning";
+```
+
+Concrete provider model IDs are runtime configuration.
+
+The model cannot choose its own tier.
+
+Model invocations use bounded context, strict structured decisions, minimum capability-scoped tool exposure, deterministic retry/escalation budgets, and no hidden session dependency.
+
+## 8.10 Deterministic Completion
+
+A model `complete` decision is a proposal, not success authority.
+
+Before `succeeded`, the Control Plane validates applicable completion semantics:
+
+- required workflow phase;
+- required verified tool outcomes;
+- required evidence;
+- no unresolved consequential tool call;
+- no relevant `unknown` idempotency state;
+- required postconditions;
+- policy-specific completion contract.
+
+```text
+model proposes complete
+        ↓
+Completion Validator
+        ├── FAIL → continue / verify / block
+        └── PASS → succeeded
+```
+
+## 8.11 ACT User Surfaces
+
+The local UI exposes command submission/status, automations, automation editing, run list/detail, activity history, evidence metadata, safe tool/model audit metadata, `needs_human` resume, and integration availability.
+
+The browser/client never receives provider credentials, unrestricted external bodies, raw browser state, prompts, hidden reasoning, or secret-bearing data.
+
+---
+
+# 9. Phase 2 — EVOLVE Runtime
+
+Phase 2 adds autonomous software development **after Phase 1 acceptance is complete**.
+
+The platform does not replace the existing action runtime. Instead it adds a separate software-development execution path.
+
+---
+
+# 10. EVOLVE Architecture
+
+```text
+                  Approved Development Task
+                            │
+                            ▼
+                  Development Coordinator
+                            │
+            ┌───────────────┼────────────────┐
+            │               │                │
+        State Machine   Context Compiler   Sandbox Manager
+            │               │                │
+            └───────────────┼────────────────┘
+                            ▼
+                    DevelopmentHarness
+                            │
+                            ▼
+                        Pi Adapter
+                            │
+                            ▼
+                         Pi SDK
+                            │
+                ┌───────────┼────────────┐
+                │           │            │
+              Planner    Implementer   Reviewer
+                │           │            │
+                │           ▼            │
+                │      Sandbox Tools     │
+                │           │            │
+                │           ▼            │
+                │    Isolated Worktree   │
+                │                        │
+                └────────────┬───────────┘
+                             ▼
+                      Candidate Commit
+                             │
+                    ┌────────┴─────────┐
+                    ▼                  ▼
+              Independent Review       CI
+                    └────────┬─────────┘
+                             ▼
+                        Quality Gate
+                       ┌─────┴─────┐
+                       │           │
+                      FAIL        PASS
+                       │           │
+                    Fix loop    Merge Ready
+                                   │
+                                   ▼
+                               Auto Merge
+                                   │
+                                   ▼
+                              Direct Deploy
+                                   │
+                                   ▼
+                             Health Verify
 ```
 
 ---
 
-# 14. Durable Workflow State
+# 11. DevelopmentHarness Abstraction
 
-The platform must never depend on an agent “remembering” what it already did.
+Pi is an implementation detail behind a project-owned contract.
 
-For consequential workflows, state is explicit.
+Illustrative interface:
 
-Example registration workflow:
+```ts
+interface DevelopmentHarness {
+  execute(
+    task: DevelopmentTask,
+    workspace: SandboxWorkspace,
+    context: DevelopmentContext,
+    role: DevelopmentRole,
+  ): AsyncIterable<DevelopmentEvent>;
 
-```text
-CREATED
-  ↓
-SEARCHING
-  ↓
-CANDIDATE_FOUND
-  ↓
-VALIDATING
-  ↓
-FILLING_FORM
-  ↓
-READY_TO_SUBMIT
-  ↓
-SUBMITTED
-  ↓
-VERIFYING
-  ↓
-CONFIRMED
-  ↓
-CALENDAR_CREATING
-  ↓
-COMPLETED
-```
-
-Possible alternate states:
-
-```text
-RETRY_WAIT
-NEEDS_HUMAN
-BLOCKED
-FAILED
-CANCELLED
-```
-
-If the process crashes after `SUBMITTED`, a new agent resumes at `VERIFYING`; it does not submit again simply because the prior model session disappeared.
-
----
-
-# 15. Idempotency and Side-Effect Safety
-
-External actions can succeed even when the client does not receive a response.
-
-Therefore every consequential action should support an idempotency strategy where practical.
-
-Examples:
-
-## Course Registration
-
-Before retrying submission:
-
-- check the account’s current registrations;
-- inspect the confirmation page state;
-- search email for a confirmation;
-- compare the course identity and user identity.
-
-## Calendar Creation
-
-Store a stable external key such as:
-
-```text
-registration_confirmation_id
-```
-
-Before creating another event, check whether an event for that key already exists.
-
-The objective is **at-most-once external side effects** where possible, even when internal attempts are retried.
-
----
-
-# 16. Verification and Evidence
-
-A tool call returning successfully is not sufficient evidence that the real-world goal succeeded.
-
-Each workflow defines postconditions.
-
-Example:
-
-```text
-clicked "Submit"
-≠ registration completed
-```
-
-Valid evidence may include:
-
-- confirmation number;
-- success page text;
-- account registration entry;
-- confirmation email;
-- created Calendar event ID;
-- expected database state;
-- expected Git commit or PR state.
-
-Agent outputs should be structured, for example:
-
-```json
-{
-  "status": "success",
-  "nextAction": "verify_email",
-  "evidence": [
-    {
-      "type": "confirmation_number",
-      "value": "ABC123"
-    }
-  ]
+  abort(runId: string): Promise<void>;
 }
 ```
 
-Malformed output is rejected and retried according to policy.
+The Control Plane and development state machine depend on `DevelopmentHarness`, not directly on Pi APIs.
+
+This permits later adapters without rewriting task state, review policy, CI, or merge logic.
 
 ---
 
-# 17. Human-in-the-Loop Policy
+# 12. Pi's Role
 
-The platform is intended to operate autonomously, but human interaction remains useful at specific boundaries.
+Pi is the initial **coding-agent harness** for Phase 2.
 
-## 17.1 Human-Owned Decisions
+It may provide generic execution mechanics such as agent loop, model interaction, tool-call handling, streaming, task-local sessions, session trees/branching, context compaction, extension hooks, and model-provider abstraction.
 
-The user primarily owns:
+Pi does **not** own development-task state, project roadmap, specification authority, architecture rules, acceptance criteria, merge policy, deployment policy, long-term memory, project secrets, host access, sandbox policy, or user account integrations.
 
-- product direction;
-- new goals;
-- subjective preferences;
-- major architecture choices;
-- approval of significant new system behavior when discussion is useful.
-
-## 17.2 Pre-Authorized Autonomous Actions
-
-The user can explicitly authorize classes of actions, for example:
-
-- register for matching free courses;
-- create Calendar events after confirmation;
-- run recurring research jobs;
-- modify the personal app after approved planning;
-- auto-merge development changes that satisfy quality gates.
-
-## 17.3 Human Escalation
-
-The workflow may pause for:
-
-- CAPTCHA;
-- OTP / 2FA;
-- 3-D Secure;
-- identity checks;
-- legally meaningful declarations requiring user action;
-- ambiguous high-impact decisions;
-- repeated unrecoverable failures.
-
-The desired behavior is not to abandon the workflow. It should preserve state, request the smallest required human step, then resume.
+The platform must remain correct if a Pi session is lost.
 
 ---
 
-# 18. Prompt Injection and Trust Boundaries
+# 13. Pi Session Semantics
 
-The system will routinely process untrusted external content.
+Pi sessions are **task-local execution memory**, not workflow truth.
 
-Treat the following as **untrusted data**:
-
-- web pages;
-- emails;
-- third-party API responses;
-- uploaded files;
-- scraped text.
-
-Treat the following as **trusted instructions**:
-
-- user commands;
-- system policies;
-- stored automation definitions;
-- application configuration;
-- approved architecture rules.
-
-External text must never automatically gain instruction authority.
-
-Security depends on:
-
-- minimal tool exposure;
-- tool-level permissions;
-- isolated execution;
-- hidden credentials;
-- schema validation;
-- side-effect policies;
-- explicit state machines;
-- audit logs.
-
----
-
-# 19. Secrets and Credentials
-
-Models should not receive raw credentials.
+Allowed use:
 
 ```text
-Agent
-  ↓
-calendar.create_event(...)
-  ↓
-Tool Gateway
-  ↓
-credential store / OAuth session
-  ↓
-Google Calendar API
+Development Task T
+    ↓
+fresh Pi session
+    ↓
+implementation attempt
+    ↓
+compaction if needed
+    ↓
+tests / diff
+    ↓
+attempt completed
 ```
 
-The agent only receives the action result, not refresh tokens, passwords, or API secrets.
+A session may be resumed for the **same bounded task/attempt** when useful, but it must never be the only source of current task state, approved plan, acceptance criteria, changed-file truth, review findings, retry count, or merge readiness.
 
-For browser workflows, prefer a controlled persistent browser profile or OAuth session over putting usernames and passwords into prompts.
+Across independent tasks, default to fresh sessions.
+
+## 13.1 Compaction
+
+Pi's compaction may reduce context size, but compaction summaries are not authoritative project memory.
+
+A custom compaction hook may preserve useful execution metadata such as:
+
+```text
+Goal
+Approved constraints
+Progress
+Files read
+Files modified
+Tests run
+Known failures
+Next step
+```
+
+However, the Development Context Compiler always reconstructs required authoritative context from PostgreSQL/Git/docs before a new task execution.
 
 ---
 
-## 19.1 Phase 1 Credential Bootstrap
+# 14. Pi Resource Loading and Project Trust
 
-Phase 1 requires explicit local setup for credentials that cannot be generated by an agent.
+Pi project-local resources and extensions execute with the Pi process's permissions and therefore must not be automatically trusted as a security boundary.
 
-Expected configuration includes:
+For unattended EVOLVE runs:
 
-```text
-OPENAI_API_KEY
-GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET
-Google OAuth refresh/session material
-GitHub credentials required for CI/deployment, where applicable
-```
+- do not auto-discover arbitrary project `.pi/extensions`;
+- do not load mutable repository extensions merely because they exist;
+- prefer an explicitly constructed, harness-owned `ResourceLoader`;
+- load only reviewed harness extensions/tools from the trusted runner image;
+- treat repository text, comments, docs, generated files, and build output as untrusted model context unless specifically elevated by policy;
+- never use Pi “project trust” as a substitute for OS/container isolation.
 
-Rules:
-
-- never commit secrets;
-- never include secrets in prompts, model context, tool summaries, traces, or persisted agent messages;
-- adapters may access secrets at execution time;
-- browser login state should use a protected persistent Playwright profile when appropriate;
-- setup documentation must describe exact manual OAuth/bootstrap steps;
-- tests use fakes/mocks or dedicated test credentials and must not require the user's production account.
+Repository-controlled prompts may provide task context but may not grant new system capabilities.
 
 ---
 
-# 20. Retry and Failure Classification
+# 15. Development Sandbox Boundary
 
-Retry behavior should be deterministic by failure class.
+Pi has no built-in security sandbox. Therefore the EVOLVE design requires an OS/container/VM boundary.
+
+The autonomous coding model must never receive a host shell.
+
+## 15.1 Trusted Runner vs Untrusted Tool Sandbox
+
+Preferred architecture:
 
 ```text
-Network timeout
-→ deterministic retry with backoff
-
-Rate limit
-→ wait / backoff using retry metadata
-
-Malformed structured model output
-→ model retry
-
-Insufficient reasoning
-→ stronger model profile
-
-Website layout changed
-→ browser re-observation and re-plan
-
-Tool repeatedly unreliable
-→ improvement proposal or development task
-
-Repeated unrecoverable failure
-→ BLOCKED / human notification
+HOST / TRUSTED DEVELOPMENT RUNNER
+---------------------------------
+Development Coordinator
+Pi SDK
+Model credentials
+DevelopmentHarness
+Sandbox Gateway
+        │
+        │ only project-owned tool calls
+        ▼
+ISOLATED DEV SANDBOX
+---------------------------------
+ephemeral filesystem/worktree
+compiler/runtime
+package manager
+tests
+git worktree contents
+restricted network
+NO model credentials
+NO personal credentials
+NO production DB credentials
+NO host ~/.ssh
+NO host ~/.pi/agent
+NO Docker socket
 ```
 
-Do not treat every failure as a reason to “ask the model again.”
+The trusted runner may use Pi SDK, but **Pi built-in host filesystem/bash tools are not exposed directly**.
+
+Instead, Pi receives project-owned tools that route operations to the isolated sandbox.
+
+Example tool set:
+
+```text
+sandbox.read
+sandbox.list
+sandbox.search
+sandbox.write
+sandbox.edit
+sandbox.exec
+git.diff
+git.status
+```
+
+These act on the sandbox/worktree only.
+
+## 15.2 Why the Split Matters
+
+If a model API credential and unrestricted `bash` live in the same execution environment, generated code or shell commands may be able to read or exfiltrate that credential.
+
+Therefore model credentials remain in the trusted Development Runner whenever practical.
+
+The sandbox gets only the credentials strictly needed by the task, preferably none.
+
+## 15.3 Docker Ownership
+
+The application worker must not receive `/var/run/docker.sock`.
+
+Sandbox/container creation belongs to a host-level trusted development runner or equivalent sandbox service outside the regular Compose application trust boundary.
+
+The main app/worker can request development execution through durable state or a narrow local interface; they do not gain unrestricted host-container control.
 
 ---
 
-# 21. Development and Self-Evolution Loop
+# 16. Development Context Compiler
 
-When the system needs a new durable capability, it enters the development loop.
+Pi does not replace the platform Context Compiler.
 
-Sources of development work include:
+For every development role, the platform creates a bounded `DevelopmentContext`.
 
-- explicit user feature requests;
-- approved planning discussions;
-- bugs discovered during use;
-- repeated automation failures;
-- a generic browser workflow that should become a dedicated adapter;
-- poor performance or excessive cost;
-- missing tool capability.
-
-## 21.1 Development Flow
+Typical contents:
 
 ```text
-Idea / capability gap
-       ↓
-Planning discussion if needed
-       ↓
-Approved specification
-       ↓
-Task decomposition
-       ↓
-Task DB
-       ↓
-Agent Supervisor
-       ↓
-Context Compiler
-       ↓
-Coder Agent
-       ↓
-PR
-   ┌───┴───┐
-   ▼       ▼
-Reviewer   CI
-   └───┬───┘
-       ▼
-Quality Gate
-       │
-       ├── FAIL → feedback → coder retry
-       │
-       └── PASS
-              ↓
-          Auto Merge
-              ↓
-          Direct Deploy
+Task goal
+Task specification
+Acceptance criteria
+Relevant architecture invariants
+Relevant ADRs
+Relevant AGENTS.md policy
+Base commit
+Allowed paths / forbidden paths
+Relevant files
+Known failures
+Previous review findings
+Required quality gates
+Budget / attempt limits
 ```
 
-## 21.2 Independent Review
+Do not dump the entire repository or full task history by default.
 
-The reviewer should use a fresh session and preferably an independent model profile from the coder.
+Context selection is role-specific.
+
+---
+
+# 17. Development Roles
+
+## 17.1 Planner
+
+Purpose: clarify implementation approach, identify ambiguity, identify affected components, and propose tests/acceptance mapping.
+
+Default capabilities:
+
+```text
+read
+search
+list
+restricted test discovery
+```
+
+No write/merge/deploy authority.
+
+Planning output is structured and becomes authoritative only after the user or deterministic policy approves it.
+
+## 17.2 Implementer
+
+Purpose: modify code, write tests, run local quality checks, and produce a candidate commit/diff.
+
+Capabilities are sandbox-only:
+
+```text
+read
+search
+write
+edit
+exec
+git status/diff
+```
+
+No host access, production credentials, personal integrations, merge authority, or deployment authority.
+
+## 17.3 Reviewer
+
+Reviewer always uses a fresh execution context independent of the Implementer session.
 
 Inputs:
 
-- task specification;
+- original task/specification;
 - acceptance criteria;
 - architecture rules;
-- Git diff;
-- relevant source files;
+- candidate diff/commit;
+- relevant source;
 - test results;
-- coverage results.
+- CI results.
 
-Review for:
+The Reviewer does **not** inherit the Implementer conversation, Implementer compaction, or the Implementer's claim that the task is complete.
 
-- correctness;
-- edge cases;
-- failure handling;
-- concurrency;
-- architecture violations;
-- security;
-- unnecessary complexity;
-- test quality;
-- maintainability.
+Reviewer capabilities should normally be read-only plus sandboxed test execution.
 
-The reviewer returns structured `APPROVE` or `REQUEST_CHANGES` findings.
-
----
-
-# 22. CI and Quality Gates
-
-For owned executable code, **100% test coverage is a hard merge requirement**.
-
-Required metrics:
+The Reviewer returns structured:
 
 ```text
-Statements: 100%
-Branches:   100%
-Functions:  100%
-Lines:      100%
+APPROVE
+or
+REQUEST_CHANGES(findings[])
 ```
 
-A merge requires all applicable checks:
-
-- unit tests;
-- integration tests;
-- E2E tests where appropriate;
-- 100% statements coverage;
-- 100% branches coverage;
-- 100% functions coverage;
-- 100% lines coverage;
-- type checking;
-- lint;
-- build;
-- security checks;
-- independent reviewer approval.
-
-## 22.1 Coverage Integrity
-
-Agents may not escape the coverage gate by silently adding new exclusions.
-
-Examples of prohibited behavior without explicit repository policy:
-
-- `istanbul ignore` additions;
-- arbitrary coverage ignore patterns;
-- excluding files solely because they are difficult to test.
-
-Generated code, vendored code, and pure declarations can be excluded at repository-policy level where appropriate.
-
-## 22.2 Coverage Is Necessary, Not Sufficient
-
-The reviewer must inspect whether tests assert meaningful behavior rather than merely executing lines.
-
-Important paths should test:
-
-- happy path;
-- boundary conditions;
-- invalid input;
-- error handling;
-- retries;
-- timeouts;
-- state transitions;
-- side effects;
-- idempotency where relevant.
-
-Mutation testing may later be enabled selectively for critical modules if needed.
+Reviewer approval alone is still insufficient for merge; deterministic CI gates must also pass.
 
 ---
 
-# 23. Direct Deployment
+# 18. Development Task State Machine
 
-After auto-merge to `main`, the system deploys directly to the running personal environment.
-
-Recommended initial mechanism:
-
-```text
-merge main
-   ↓
-GitHub Actions
-   ↓
-self-hosted runner on the personal server / Mac mini
-   ↓
-./scripts/deploy.sh
-   ↓
-git fetch / checkout expected revision
-   ↓
-docker compose build
-   ↓
-docker compose up -d
-   ↓
-/health verification
-```
-
-The deploy runner must live outside the Docker Compose application stack so it can restart `app` and `worker` without killing the deployment mechanism itself.
-
-No separate staging environment is required initially.
-
-A deployment is not considered successful merely because containers started. The deploy script must verify the expected revision and health endpoint. If deployment itself fails, CI reports failure and the system remains on or returns to the last runnable revision using simple Git/Docker mechanics. A sophisticated rollout platform is intentionally deferred.
-
----
-
-# 24. Observability
-
-The MVP does not need an enterprise monitoring stack.
-
-Start with:
-
-- structured application logs;
-- automation run history;
-- tool-call logs;
-- error table;
-- task / agent-run history;
-- deployment history;
-- basic `/health` endpoint;
-- optional lightweight usage and model-cost metrics.
-
-These are sufficient to answer:
-
-- what happened?
-- which automation caused it?
-- which model and tools were used?
-- what failed?
-- was it retried?
-- what evidence proved success?
-- which code change introduced the behavior?
-
-A more advanced observability system can be added later if operational complexity justifies it.
-
----
-
-# 25. Core Data Model
-
-## 25.1 Automation
-
-```json
-{
-  "id": "AUTO-001",
-  "name": "VTC SUA Registration",
-  "goal": "...",
-  "schedule": "0 9 * * *",
-  "enabled": true,
-  "modelProfile": "GENERAL_AGENT",
-  "toolPolicy": "course-registration",
-  "createdAt": "...",
-  "updatedAt": "...",
-  "nextRunAt": "...",
-  "lastRunAt": "..."
-}
-```
-
-## 25.2 AutomationRun
-
-```json
-{
-  "id": "ARUN-100",
-  "automationId": "AUTO-001",
-  "state": "VERIFYING",
-  "attempt": 2,
-  "startedAt": "...",
-  "updatedAt": "...",
-  "completedAt": null,
-  "modelProfile": "GENERAL_AGENT",
-  "result": null,
-  "evidence": []
-}
-```
-
-## 25.3 ToolCall
-
-```json
-{
-  "id": "TCALL-900",
-  "runId": "ARUN-100",
-  "tool": "calendar.create_event",
-  "status": "success",
-  "idempotencyKey": "registration:ABC123",
-  "requestedAt": "...",
-  "completedAt": "...",
-  "inputSummary": "...",
-  "outputSummary": "..."
-}
-```
-
-## 25.4 Development Task
-
-```json
-{
-  "id": "TASK-123",
-  "type": "feature",
-  "title": "Add dedicated VTC course adapter",
-  "description": "...",
-  "status": "READY",
-  "priority": 7,
-  "acceptanceCriteria": [],
-  "baseCommit": "abc123",
-  "sourceAutomation": "AUTO-001"
-}
-```
-
-## 25.5 AgentRun
-
-```json
-{
-  "id": "RUN-456",
-  "taskId": "TASK-123",
-  "role": "coder",
-  "attempt": 1,
-  "modelProfile": "CODER",
-  "startCommit": "abc123",
-  "resultBranch": "agent/TASK-123/attempt-1",
-  "status": "completed",
-  "testsPassed": true,
-  "coveragePassed": true,
-  "summary": "..."
-}
-```
-
----
-
-# 26. Development Task State Machine
+Suggested durable Phase 2 state:
 
 ```text
 DRAFT
@@ -1404,509 +855,772 @@ AWAITING_PLAN_APPROVAL
   ↓
 READY
   ↓
-CODING
+PREPARING_SANDBOX
+  ↓
+IMPLEMENTING
+  ↓
+TESTING
   ↓
 REVIEWING
-  ↓
-VALIDATING
   │
-  ├── failure → FIX_REQUIRED → CODING
+  ├── REQUEST_CHANGES → FIX_REQUIRED → IMPLEMENTING
   │
-  └── pass
-       ↓
-   MERGE_READY
-       ↓
-     MERGED
-       ↓
-    DEPLOYING
-       ↓
-   COMPLETED
+  └── APPROVE
+           ↓
+       VALIDATING
+           │
+           ├── FAIL → FIX_REQUIRED
+           └── PASS
+                  ↓
+             MERGE_READY
+                  ↓
+               MERGED
+                  ↓
+              DEPLOYING
+                  ↓
+              VERIFYING
+                  ↓
+              COMPLETED
 ```
 
 Exceptional states:
 
 ```text
+NEEDS_HUMAN
 BLOCKED
 FAILED
 CANCELLED
 ```
 
-The state lives in PostgreSQL, not in the conversation.
+The state lives in PostgreSQL, not in Pi.
 
 ---
 
-# 27. Example End-to-End Workflow: Course Registration
+# 19. Git and Workspace Model
 
-User instruction:
+Every implementation attempt gets an isolated workspace.
 
-> “Every day, check for an evening SUA Advanced Rating course near Tsuen Wan. If a suitable course has space and I am eligible, register me. After confirmation, add it to Google Calendar.”
-
-## Creation
+Preferred model:
 
 ```text
-User
- ↓
-Intent Router → AUTOMATION_CREATE
- ↓
-Planner clarifies criteria if necessary
- ↓
-Automation stored
+base commit
+    ↓
+create Git worktree / isolated copy
+    ↓
+sandbox
+    ↓
+Pi Implementer
+    ↓
+tests
+    ↓
+candidate commit
 ```
 
-## Daily Execution
+Rules:
 
-```text
-Scheduler fires
- ↓
-AutomationRun created
- ↓
-Capability Resolver
- ↓
-Allowed tools:
-- browser
-- Gmail
-- Calendar
- ↓
-General Agent starts
- ↓
-Browser searches course site
- ↓
-Candidate found?
- ├─ no → record result → complete run
- └─ yes
-      ↓
-   validate course criteria
-      ↓
-   fill form
-      ↓
-   read back form summary
-      ↓
-   submit
-      ↓
-   verify confirmation
-      ↓
-   Gmail confirmation if necessary
-      ↓
-   Calendar create with idempotency key
-      ↓
-   verify event exists
-      ↓
-   Automation marked completed if configured to stop after success
-```
-
-If CAPTCHA or OTP appears:
-
-```text
-persist current state
- ↓
-NEEDS_HUMAN
- ↓
-user completes required step
- ↓
-resume same AutomationRun
-```
+- record exact base commit;
+- record resulting candidate commit;
+- reviewer evaluates the exact candidate revision;
+- merge only the approved revision;
+- no agent writes directly to `main`;
+- sandbox destruction must not lose durable task/review state.
 
 ---
 
-# 28. Example Self-Evolution Workflow
+# 20. Development Retry and Budget Policy
 
-Assume the VTC workflow repeatedly fails because browser extraction is unreliable.
+The development loop is bounded.
+
+Example controls:
+
+- max implementation attempts;
+- max reviewer cycles;
+- max model invocations;
+- max wall-clock time;
+- max token/cost budget;
+- max CI retries;
+- explicit terminal conditions.
+
+Failure classes differ:
 
 ```text
-Automation failures accumulate
-       ↓
-Evaluator identifies repeated pattern
-       ↓
-Proposal:
-"Build dedicated VTC course adapter"
-       ↓
-User approves direction if required
-       ↓
-Development task
-       ↓
-Coder Agent
-       ↓
-Reviewer Agent
-       ↓
-CI + 100% coverage
-       ↓
-Auto merge
-       ↓
-Direct deploy
-       ↓
-Tool Registry now exposes:
-- vtc.search_courses
-- vtc.get_course
-- vtc.register_course
+model/provider transient error
+→ retry transport
+
+malformed structured output
+→ bounded model retry
+
+test failure
+→ implementation feedback
+
+review finding
+→ implementation retry
+
+architecture ambiguity
+→ NEEDS_HUMAN / plan approval
+
+sandbox infrastructure failure
+→ deterministic infrastructure retry
+
+repeated failure
+→ BLOCKED
 ```
 
-The automation can then use the dedicated tool instead of generic browser navigation.
-
-The platform therefore evolves from generic interaction toward reliable domain-specific capabilities only where justified by actual use.
+The model cannot raise its own limits.
 
 ---
 
-# 29. Monorepo Structure
+# 21. CI and Independent Acceptance
 
-Keep the initial codebase compact.
+A candidate may merge only if all applicable gates pass.
+
+Required baseline:
+
+- unit tests;
+- integration tests;
+- E2E tests where applicable;
+- statements 100%;
+- branches 100%;
+- functions 100%;
+- lines 100%;
+- lint;
+- typecheck;
+- build;
+- migration checks if relevant;
+- security/scope checks;
+- independent Reviewer approval.
+
+A model-generated test suite cannot serve as the only acceptance oracle.
+
+Where important behavior is domain-specific, encode deterministic invariants or property tests.
+
+---
+
+# 22. Auto-Merge
+
+Auto-merge is deterministic.
+
+Required conditions:
+
+```text
+task revision still current
+AND approved plan/spec unchanged
+AND independent review = APPROVE
+AND CI = PASS
+AND coverage = exact required thresholds
+AND no unresolved blocking finding
+AND merge policy allows automation
+```
+
+The coding agent cannot merge itself by merely claiming completion.
+
+---
+
+# 23. Direct Deployment
+
+After merge to `main`:
+
+```text
+merge main
+   ↓
+CI / trusted deploy runner
+   ↓
+checkout exact expected revision
+   ↓
+docker compose build
+   ↓
+docker compose up -d
+   ↓
+health verification
+   ↓
+verify deployed revision
+```
+
+The deploy mechanism must run outside the application containers it needs to restart.
+
+A deployment is not successful merely because a process started.
+
+Verify expected revision, migrations, service health, and required runtime checks.
+
+If deployment fails, use simple Git/Docker recovery first. Do not add a sophisticated rollout platform without need.
+
+---
+
+# 24. Phase 2 Implementation Sequence
+
+Phase 2 should be built incrementally.
+
+## 24.1 Phase 2A — Development Harness Spike
+
+Goal:
+
+```text
+Human-approved development task
+        ↓
+durable DevelopmentTask
+        ↓
+isolated workspace
+        ↓
+DevelopmentHarness
+        ↓
+Pi Implementer
+        ↓
+code + tests
+        ↓
+candidate commit
+        ↓
+sandbox destroyed
+```
+
+No auto-merge yet.
+
+Acceptance:
+
+- one real small task can be implemented from a bounded spec;
+- exact base/result commits recorded;
+- no host credential leakage;
+- sandbox is disposable;
+- task remains reconstructable without Pi session state.
+
+## 24.2 Phase 2B — Independent Review
+
+Add:
+
+```text
+candidate commit
+    ↓
+fresh Reviewer session
+    ↓
+APPROVE / REQUEST_CHANGES
+```
+
+Acceptance:
+
+- reviewer receives no implementer session;
+- reviewer cannot mutate candidate;
+- findings are durable;
+- review is bound to exact candidate commit.
+
+## 24.3 Phase 2C — Autonomous Fix Loop
+
+Add:
+
+```text
+implement
+→ test
+→ review
+→ findings
+→ fresh/bounded fix attempt
+→ test
+→ review
+```
+
+Acceptance:
+
+- bounded attempts;
+- deterministic stop conditions;
+- durable retry history;
+- no infinite loop.
+
+## 24.4 Phase 2D — Merge and Deploy
+
+Add:
+
+```text
+Reviewer PASS
++ CI PASS
++ deterministic merge gate
+→ auto-merge
+→ direct deploy
+→ health verification
+```
+
+Acceptance:
+
+- agent cannot bypass CI/review;
+- deployed revision is verified;
+- deployment failure becomes durable failure/fix work.
+
+---
+
+# 25. Phase 2 Definition of Done
+
+Phase 2 is complete only when all applicable criteria below pass.
+
+1. Development tasks are durable in PostgreSQL.
+2. Every task records an exact base revision.
+3. Development execution uses `DevelopmentHarness`, not Pi-specific business logic.
+4. Pi is replaceable behind the harness interface.
+5. Development sessions are task-local and non-authoritative.
+6. A task can restart without depending on Pi session memory.
+7. Every implementation attempt runs against an isolated workspace.
+8. The coding model has no host shell.
+9. The coding model has no Docker socket.
+10. Sandbox code receives no personal Gmail/Calendar credentials.
+11. Sandbox code receives no production database credentials.
+12. Model credentials are not exposed to sandbox shell/processes under the approved runner architecture.
+13. Project-local Pi extensions are not automatically trusted/loaded in unattended mode.
+14. Context is compiled from durable sources and bounded.
+15. Planner, Implementer, and Reviewer capabilities are role-scoped.
+16. Reviewer uses fresh context independent from Implementer conversation/session.
+17. Candidate code is bound to an exact commit/diff.
+18. Review findings are durable.
+19. CI and review gates are independent.
+20. Owned executable code remains at exact 100% statements/branches/functions/lines.
+21. Development retries are bounded.
+22. Auto-merge requires deterministic policy, review approval, and CI success.
+23. Coding models cannot merge themselves directly.
+24. Deployment verifies the expected revision and runtime health.
+25. A complete approved task can proceed from specification to merged/deployed code without manual PR babysitting under configured policy.
+
+---
+
+# 26. Phase 3 — Self-Improvement
+
+Only after ACT and EVOLVE are proven.
+
+Phase 3 adds an Improvement Evaluator / Capability Gap Detector.
+
+Inputs may include repeated automation failures, tool failure rates, recurring manual intervention, excessive browser fragility, model cost/performance, user feedback, runtime errors, and repeated missing capability.
+
+Example:
+
+```text
+browser workflow repeatedly fails
+        ↓
+pattern detected
+        ↓
+proposal:
+"Build dedicated VTC adapter"
+        ↓
+human approval if required
+        ↓
+DevelopmentTask
+        ↓
+Phase 2 pipeline
+        ↓
+new adapter merged/deployed
+        ↓
+future automation uses dedicated tool
+```
+
+The Evaluator may propose work but does not bypass specification policy, user-owned architecture decisions, DevelopmentHarness isolation, independent review, CI, merge policy, or deployment verification.
+
+---
+
+# 27. Development Data Model Additions
+
+Phase 2 may add entities such as:
+
+## 27.1 `development_tasks`
+
+```text
+id
+type
+title
+description
+status
+priority
+approved_spec
+acceptance_criteria
+base_commit
+source_automation_id?
+source_run_id?
+max_attempts
+created_at
+updated_at
+```
+
+## 27.2 `development_attempts`
+
+```text
+id
+task_id
+role
+attempt
+harness
+semantic_model_profile
+base_commit
+candidate_commit?
+sandbox_id
+status
+started_at
+completed_at
+safe_summary
+```
+
+## 27.3 `development_reviews`
+
+```text
+id
+task_id
+candidate_commit
+reviewer_attempt_id
+decision
+structured_findings
+created_at
+```
+
+## 27.4 `ci_validations`
+
+```text
+id
+task_id
+candidate_commit
+status
+coverage_summary
+test_summary
+build_summary
+created_at
+```
+
+## 27.5 `deployments`
+
+```text
+id
+commit
+status
+started_at
+completed_at
+health_verified
+safe_summary
+```
+
+Do not persist full hidden reasoning or unrestricted session transcripts.
+
+---
+
+# 28. Security and Trust Boundaries
+
+## 28.1 Untrusted Content
+
+Treat as untrusted data:
+
+- webpages;
+- emails;
+- scraped content;
+- uploaded files;
+- repository comments;
+- repository documentation unless explicitly policy-trusted;
+- generated source code;
+- build output;
+- test output;
+- dependency output.
+
+External/repository text may inform reasoning but cannot grant additional tools or permissions.
+
+## 28.2 Trusted Instructions
+
+Trusted instruction sources are explicitly bounded:
+
+- system policy;
+- user-approved goals/specifications;
+- `docs/design.md`;
+- approved ADRs;
+- `AGENTS.md`;
+- approved implementation plan;
+- deterministic runtime configuration.
+
+## 28.3 Secrets
+
+Secrets never enter prompts, persisted model context, unrestricted logs, audit summaries, evidence, browser output, or repository commits.
+
+ACT adapters hold their own credentials.
+
+EVOLVE sandboxes receive the minimum credentials required, ideally none.
+
+## 28.4 Pi-Specific Security Rule
+
+Pi is not a sandbox.
+
+The system must assume that built-in file tools can modify accessible files, built-in shell runs with Pi process permissions, extensions run with Pi process permissions, and project trust does not protect against unsafe tool execution after startup.
+
+Therefore unattended Pi execution requires external OS/container/VM isolation and explicit tool routing.
+
+---
+
+# 29. Observability
+
+Start small.
+
+Required useful history:
+
+- automation runs;
+- tool calls;
+- evidence;
+- model invocation metadata;
+- development tasks;
+- development attempts;
+- review findings;
+- CI results;
+- deployments;
+- errors;
+- health state.
+
+The system should answer:
+
+```text
+What happened?
+Why did it happen?
+Which durable task/run caused it?
+Which model profile was used?
+Which tools were available?
+What external action occurred?
+What evidence proves success?
+Which code revision changed behavior?
+Who/what approved the change?
+Did CI pass?
+Which revision is currently deployed?
+```
+
+Do not build an enterprise telemetry platform until needed.
+
+---
+
+# 30. Monorepo Direction
+
+Existing Phase 1 structure remains valid:
 
 ```text
 personal-agent/
-│
 ├── apps/
-│   ├── app/                 # web UI + API + chat
-│   └── worker/              # scheduler + control plane + agent runner
-│
+│   ├── app/
+│   └── worker/
 ├── packages/
-│   ├── db/                  # schema and repositories
-│   ├── agents/              # model interfaces and role prompts
-│   ├── tools/               # tool registry and adapters
-│   └── shared/              # shared types / utilities
-│
+│   ├── db/
+│   ├── agents/
+│   ├── tools/
+│   └── shared/
 ├── docs/
-│   ├── architecture.md
-│   ├── decisions/
-│   └── policies/
-│
+│   ├── design.md
+│   ├── implementation-plan.md
+│   └── decisions/
 ├── AGENTS.md
+├── Dockerfile
 ├── docker-compose.yml
 └── package.json
 ```
 
-Inside `apps/worker`, components can initially remain simple modules rather than separate packages:
+Phase 2 may add:
 
 ```text
-worker/src/
-├── scheduler.ts
-├── control-plane.ts
-├── intent-router.ts
-├── model-router.ts
-├── capability-resolver.ts
-├── policy.ts
-├── runner.ts
-├── context-compiler.ts
-├── supervisor.ts
-└── evaluator.ts
+packages/
+├── dev-harness/
+│   ├── contract.ts
+│   ├── context-compiler.ts
+│   ├── roles.ts
+│   ├── pi/
+│   │   └── pi-harness.ts
+│   └── sandbox/
+│       ├── contract.ts
+│       └── gateway.ts
 ```
 
-Do not split these into independent services until a real scaling or ownership boundary requires it.
+and a host-level trusted development-runner entrypoint if required by the sandbox architecture.
+
+Do not create a new network service merely for package organization.
 
 ---
 
-# 30. Runtime Deployment
+# 31. Deployment Topology After Phase 2
 
-Initial always-on runtime:
+Application runtime:
 
 ```text
-Mac mini / personal server
-│
-├── postgres
+Docker Compose
 ├── app
-└── worker
+├── worker
+└── postgres
 ```
 
-The AI models themselves are not continuously running.
-
-The worker waits for:
-
-- due automations;
-- user actions;
-- development tasks;
-- webhook events;
-- retries.
-
-When work appears, it launches a disposable agent run. After completion, the model session ends.
-
-This keeps the system available 24/7 without continuously consuming model tokens.
-
----
-
-# 31. Implementation Strategy
-
-## 31.1 Phase 1 — The Only Initial Implementation Target
-
-Build one complete useful workflow before autonomous development.
+Development execution boundary:
 
 ```text
-Chat / command
-  ↓
-Create automation
-  ↓
-Persist automation
-  ↓
-Scheduler wakes it
-  ↓
-Create durable AutomationRun
-  ↓
-Resolve minimal capabilities
-  ↓
-Select model profile
-  ↓
-Fresh agent
-  ↓
-Browser / Gmail / Calendar tools
-  ↓
-Verify real-world outcome
-  ↓
-Persist result + evidence + history
+Host / trusted machine
+└── dev-runner
+    ├── Pi SDK
+    ├── model credentials
+    ├── sandbox manager
+    └── sandbox gateway
+          │
+          ▼
+      ephemeral sandbox
+      └── repo worktree + toolchain
 ```
 
-Phase 1 includes:
+Deployment runner may also be host-level.
 
-- PostgreSQL schema and migrations;
-- Next.js app with minimal Chat/Command, Automations, and Runs/Activity surfaces;
-- worker process;
-- scheduler;
-- durable AutomationRun state;
-- model profiles and deterministic router;
-- capability resolver;
-- tool registry;
-- browser adapter;
-- Gmail adapter;
-- Calendar adapter;
-- normalized `ToolResult`;
-- idempotency and verification hooks;
-- audit/run history;
-- credential bootstrap documentation;
-- Docker Compose local runtime;
-- CI with the required quality gates.
-
-### Phase 1 Definition of Done
-
-Phase 1 is complete only when all of the following are true:
-
-1. A user can create an automation from natural language.
-2. The automation is stored durably in PostgreSQL.
-3. Restarting `app`, `worker`, or the host does not lose automation definitions.
-4. A due schedule creates exactly one run for a given `(automation_id, scheduled_for)`.
-5. The same automation cannot accidentally execute overlapping runs under the default policy.
-6. Every run loads a fresh model session from durable state.
-7. Each run receives only the tools resolved for that task.
-8. The general agent can use the browser, search/read Gmail, and create a Calendar event through adapters.
-9. Every tool call is logged with normalized status and safe summaries.
-10. Consequential tool calls support duplicate protection or explicit verification before retry.
-11. `unknown` side-effect outcomes enter verification rather than blind retry.
-12. A crashed or interrupted run can resume from persisted workflow state.
-13. A successful workflow stores evidence proving completion.
-14. Calendar creation is idempotent under retries.
-15. The user can inspect automations, latest run state, result, and tool-call history.
-16. Secrets never appear in model context or persisted tool summaries.
-17. `docker compose up` starts the complete application runtime from documented setup.
-18. Database migrations work from a clean database.
-19. Lint passes.
-20. Typecheck passes.
-21. Build passes.
-22. All tests pass.
-23. Owned executable code reports exactly **100% statements, 100% branches, 100% functions, and 100% lines coverage**.
-24. No new coverage exclusions are introduced merely to satisfy the gate.
-25. A clean-checkout setup/run guide is complete and reproducible except for real external credentials.
-
-**Do not implement Phase 2 or Phase 3 until every Phase 1 criterion is satisfied.**
-
-## 31.2 Phase 2 — Autonomous Development Loop
-
-After Phase 1 is useful in daily operation, add:
-
-- development task state machine;
-- Git worktrees;
-- Context Compiler;
-- coding-agent adapter (Codex or equivalent behind an interface);
-- independent reviewer agent;
-- CI-driven quality gate;
-- automatic coder retry from review/CI findings;
-- automatic merge;
-- direct deployment through the mechanism in Section 23.
-
-The implementation agent must preserve the same principle: coding models can propose and modify code, but Git, CI, coverage, state transitions, and merge/deploy authority remain deterministic.
-
-## 31.3 Phase 3 — Self-Improvement
-
-Only after the ACT runtime and development loop are proven:
-
-- detect repeated operational failures;
-- identify capability gaps;
-- propose dedicated tools when generic browser workflows are unreliable;
-- connect approved proposals to development tasks;
-- collect model/tool success metrics;
-- improve routing policies from evidence;
-- evolve generic workflows into reliable domain-specific tools where usage justifies the maintenance cost.
-
-## 31.4 Bootstrap Rule
-
-During Stage 0 and Phase 1, the user manually uses Codex as the development agent. The platform does **not** need to invoke Codex programmatically yet. This avoids requiring the system to self-host its own development loop before its basic operator runtime exists.
+The app worker must not gain broad host privileges merely because EVOLVE exists.
 
 ---
 
 # 32. What We Intentionally Do Not Build Yet
 
-To avoid losing the project inside infrastructure work, the following are deferred until a concrete requirement appears:
-
 ```text
+LangGraph
 Temporal
 Redis
 Kafka
 Kubernetes
-separate staging environment
-canary deploys
-full feature-flag platform
-enterprise observability stack
-large microservice decomposition
-complex multi-agent society
-custom adapter for every website
+complex distributed queues
+large multi-agent society
+staging/canary platform
+automatic arbitrary infrastructure provisioning
+host-shell access for coding agents
+Docker socket inside the app worker
+long-lived authoritative Pi sessions
+automatic loading of mutable project Pi extensions in unattended runs
+custom coding-agent loop if Pi already provides the required generic primitive
 ```
-
-The system should first prove that one user can reliably say:
-
-> “Do this for me, keep doing it, and improve yourself when necessary.”
-
-and have the platform actually complete the end-to-end task.
 
 ---
 
-# 33. Codex Implementation Handoff
+# 33. Architecture Change Policy
 
-This document is intended to be directly usable as the project source of truth.
+A change requires an explicit ADR when it modifies any of:
 
-When bootstrapping the repository, give Codex this instruction together with this file:
+- authority boundaries;
+- durable state ownership;
+- ACT vs EVOLVE runtime separation;
+- sandbox model;
+- merge/deploy policy;
+- secret handling;
+- completion semantics;
+- 100% coverage requirement;
+- introduction of a new infrastructure framework/service.
+
+A library upgrade or adapter substitution behind an existing interface usually does not require an architecture rewrite.
+
+---
+
+# 34. Implementation Strategy
+
+## Phase 1 — ACT
+
+Complete and accept the personal operator vertical slice before Phase 2.
+
+The Phase 1 implementation plan owns its exact milestone status and acceptance matrix.
+
+## Phase 2 — EVOLVE
+
+Implement in order:
 
 ```text
-Read this design document completely before making changes.
-Treat it as the source of truth for product intent, architecture, scope, and quality gates.
-
-Implement PHASE 1 ONLY. Do not implement Phase 2 or Phase 3 yet.
-
-Before coding:
-1. Identify only genuine blockers required for Phase 1.
-2. Create docs/implementation-plan.md mapping Phase 1 Definition of Done to implementation milestones.
-3. Bootstrap the pinned TypeScript-first monorepo and document all assumptions.
-
-While implementing:
-- keep the architecture simple;
-- use existing maintained libraries instead of rebuilding generic infrastructure;
-- keep state durable in PostgreSQL;
-- keep model sessions disposable;
-- keep secrets out of model context and logs;
-- use typed schemas and structured results;
-- implement idempotency and verification for side effects;
-- write meaningful tests with the production code;
-- maintain 100% statements, branches, functions, and lines coverage for owned executable code;
-- do not add coverage exclusions merely to pass CI;
-- run lint, typecheck, tests, coverage, and build after meaningful milestones;
-- do not introduce Redis, Temporal, Kafka, Kubernetes, staging, canary deployments, LangGraph, or additional services without an explicit requirement from this document.
-
-For Google OAuth or other external credentials:
-- implement the integration and exact setup instructions;
-- never invent credentials;
-- never commit secrets;
-- continue all work that does not require the missing credential.
-
-Continue autonomously until every Phase 1 Definition of Done criterion is satisfied or a genuine product/credential blocker remains.
-
-Before declaring completion:
-- verify a clean checkout setup;
-- verify migrations from an empty database;
-- verify scheduler deduplication;
-- verify restart/resume behavior;
-- verify side-effect idempotency;
-- verify audit history;
-- verify secrets are not exposed;
-- verify 100% coverage;
-- update the runbook with exact start, test, and setup commands.
+2A DevelopmentHarness + isolated implementer spike
+2B Independent reviewer
+2C Bounded autonomous fix loop
+2D Deterministic auto-merge + direct deploy
 ```
 
-Codex may create an implementation plan and ADRs, but it must not silently change the fixed decisions in Sections 1.1, 6, 13, 21, 23, or 31.
+Do not skip directly to self-improvement.
+
+## Phase 3 — Self-Improvement
+
+Add capability-gap detection and improvement proposals only after the development loop itself is reliable.
 
 ---
 
-# 34. Final System Definition
+# 35. Final System Definition
 
-The project is a **human-directed, machine-operated personal agent platform**.
+The system is a **human-directed, machine-operated personal agent platform**.
 
 The human owns:
 
 ```text
 vision
-preferences
 goals
+preferences
 ideas
-subjective judgement
+subjective judgment
 major product direction
+approval of major architecture changes
+semantic acceptance where it cannot be made deterministic
 ```
 
-The platform owns:
+The deterministic platform owns:
+
+```text
+durable workflow state
+scheduling
+permissions
+capability exposure
+leases/fencing
+idempotency
+retry policy
+completion validation
+budgets
+audit/evidence
+development task state
+review/CI gate enforcement
+merge authority
+deployment verification
+```
+
+Models/harnesses provide:
 
 ```text
 reasoning
 research
-scheduling
-automation
-browser actions
-email operations
-calendar operations
-tool orchestration
-workflow state
-retries
-verification
-model selection
-software implementation
-code review
-testing
-100% coverage enforcement
-auto merge
-direct deployment
-operational iteration
+planning proposals
+tool-selection proposals
+coding
+test generation
+review findings
+implementation suggestions
 ```
 
-The system has three modes:
+The key separation is:
 
-```text
-THINK
-- research
-- reason
-- discuss
-- plan
-
-ACT
-- use browser
-- use email
-- use calendar
-- call APIs
-- run scheduled jobs
-- complete real-world workflows
-
-EVOLVE
-- detect missing capability
-- plan a software change
-- code it
-- review it
-- test it
-- merge it
-- deploy it
-- use the new capability in future work
-```
-
-The key architectural separation is:
-
-> **Models supply intelligence. The Control Plane supplies authority, persistence, verification, and reliability.**
-
-That separation allows the platform to remain flexible enough to use increasingly capable models while keeping real-world actions and software changes under deterministic system control.
-
+> **The model may decide what it believes should happen next. The platform decides what is allowed to happen, what actually happened, whether the result satisfies the approved specification, and whether the workflow may advance.**
 
 ---
 
-# 35. Final Acceptance Summary
+# 36. External Framework Notes
 
-The architecture is considered successfully implemented when it proves the following progression:
+The initial Phase 2 Pi integration relies on the following verified properties of the current Pi documentation:
+
+- Pi exposes a TypeScript SDK with `createAgentSession`, configurable tools, session management, and extension/resource loading.
+- Pi session files support tree-shaped history and JSONL persistence.
+- Pi supports automatic compaction and branch summarization, with extension hooks that can customize summaries.
+- Pi intentionally does not provide a built-in sandbox.
+- Built-in file/shell tools and extensions run with the permissions of the Pi process.
+- Pi documentation recommends containers, VMs, micro-VMs, or policy-controlled sandboxes for unattended/untrusted work.
+
+These are **framework facts**, not platform authority. If Pi changes, update the adapter or ADR while preserving this design's control and isolation invariants.
+
+Official references consulted for Revision 3:
+
+- https://pi.dev/docs/latest/sdk
+- https://pi.dev/docs/latest/sessions
+- https://pi.dev/docs/latest/compaction
+- https://pi.dev/docs/latest/security
+- https://pi.dev/docs/latest/containerization
+
+---
+
+# 37. Final Acceptance Philosophy
+
+The platform is not successful because it can generate large amounts of code.
+
+It is successful when:
 
 ```text
 THINK
-User can ask and plan.
+The user can reason and plan with it.
 
 ACT
-User can give a recurring goal once; the platform wakes itself, uses the minimum necessary tools, completes or safely pauses the workflow, verifies the outcome, and records evidence.
+The user can state a recurring or immediate goal once.
+The platform performs permitted work, survives restart, avoids duplicate actions,
+verifies consequential outcomes, and records evidence.
 
 EVOLVE
-After ACT is proven, the platform can safely turn approved capability gaps into tested, independently reviewed, automatically merged and deployed software improvements.
+The platform can turn an approved software change into an isolated implementation,
+independent review, deterministic CI decision, merge, deployment, and verified runtime
+change without surrendering authority to the coding model.
+
+SELF-IMPROVE
+The system can recognize repeated operational deficiencies and propose improvements,
+while all software-change authority still flows through the same controlled EVOLVE pipeline.
 ```
 
-The product is valuable only if it reduces repeated manual digital work. The engineering system exists to support that goal, not to become the goal itself.
+The engineering system exists to reduce repeated manual digital work. It must not become a self-referential infrastructure project whose complexity exceeds the value it creates.
