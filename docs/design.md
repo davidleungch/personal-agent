@@ -5,7 +5,7 @@
 **Revision:** v3 — ACT runtime preserved; EVOLVE runtime redesigned around a project-owned Development Harness with Pi as the initial coding-agent harness  
 **Primary user:** Single-user personal system  
 **Operating mode:** Active development, automation-first, direct-to-production after deterministic quality gates  
-**Progress tracking:** implementation progress belongs in `docs/implementation-plan.md`; this document defines product intent, architecture, invariants, and phase boundaries.
+**Progress tracking:** Phase 1 history belongs in `docs/implementation-plan.md` and Phase 2 execution status belongs in `docs/phase-2-implementation-plan.md`; this document defines product intent, architecture, invariants, and phase boundaries.
 
 ---
 
@@ -282,7 +282,10 @@ docs/design.md
 = architecture/product truth
 
 docs/implementation-plan.md
-= approved execution plan + current implementation status
+= completed Phase 1 execution contract and status
+
+docs/phase-2-implementation-plan.md
+= approved Phase 2 execution contract and status
 
 ADRs
 = approved architecture changes
