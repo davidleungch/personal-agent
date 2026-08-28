@@ -1,4 +1,4 @@
-# Personal Agent — Phase 1
+# Personal Agent — Phase 2A
 
 Phase 1 is one Next.js app, one Node worker, and PostgreSQL. External model and
 Google credentials are optional: the base runtime starts healthy without them
@@ -6,7 +6,7 @@ and reports those integrations as unavailable.
 
 ## Prerequisites
 
-- Node.js 22.18.0
+- Node.js 22.19.0
 - pnpm 11.23.0 through Corepack
 - Docker with Docker Compose
 
@@ -146,3 +146,69 @@ calendar to inspect manually.
 
 The milestone evidence and complete Definition of Done matrix are in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md).
+
+## Phase 2A development runner
+
+Phase 2A adds a one-shot host-level development runner. It is not a Compose
+service and the app/worker receive no Docker socket, development model
+credential, Git capability, or host shell. The runner stops after an exact
+candidate commit reaches `candidate_ready`; it does not review, retry, merge,
+push, or deploy.
+
+Build the externally isolated sandbox image:
+
+```sh
+docker buildx build \
+  --target development-sandbox \
+  --tag personal-agent-development-sandbox:local \
+  --load \
+  .
+```
+
+Create a human-approved task from a secret-free specification and criteria
+file. Each criterion uses an argument vector; model-directed and final commands
+are limited to `node` or `pnpm` inside the sandbox.
+
+```json
+[
+  {
+    "id": "tests",
+    "description": "The relevant tests pass",
+    "check": {
+      "executable": "pnpm",
+      "arguments": ["test"],
+      "timeoutMs": 600000
+    }
+  }
+]
+```
+
+```sh
+DATABASE_URL=postgresql://personal_agent:personal_agent_local@127.0.0.1:5432/personal_agent \
+pnpm --filter @personal-agent/dev-harness start -- \
+  task-create \
+  --title "Approved small change" \
+  --spec-file /path/to/approved-spec.md \
+  --criteria-file /path/to/acceptance-criteria.json \
+  --base HEAD
+```
+
+For execution, configure a dedicated runner-owned Pi directory. Do not point it
+at personal `~/.pi/agent` state. Concrete provider/model IDs remain runtime
+configuration and are never persisted as task policy.
+
+```sh
+DATABASE_URL=postgresql://personal_agent:personal_agent_local@127.0.0.1:5432/personal_agent \
+DEVELOPMENT_PI_AGENT_DIR=/var/lib/personal-agent/development-runner/pi \
+DEVELOPMENT_SANDBOX_IMAGE=personal-agent-development-sandbox:local \
+pnpm --filter @personal-agent/dev-harness start -- \
+  run-once \
+  --allowed packages/shared \
+  --forbidden .git,.pi,.secrets,browser-profile \
+  --relevant packages/shared/src/domain.ts \
+  --profile balanced
+```
+
+Normal tests use a deterministic fake Pi transport and no provider account.
+The current Pi SDK is pinned to `0.84.3`; it requires Node 22.19 or newer, which
+is the concrete reason the repository's Node patch pin is 22.19.0.

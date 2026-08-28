@@ -1,4 +1,10 @@
-import type { JsonObject } from "@personal-agent/shared";
+import type {
+  DevelopmentAcceptanceCriteria,
+  DevelopmentBudget,
+  DevelopmentContextManifest,
+  DevelopmentUsage,
+  JsonObject
+} from "@personal-agent/shared";
 import { sql } from "drizzle-orm";
 import {
   boolean,
@@ -305,5 +311,156 @@ export const evidence = pgTable(
       .onDelete("restrict")
       .onUpdate("restrict"),
     check("evidence_payload_object_check", sql`jsonb_typeof(${table.payload}) = 'object'`)
+  ]
+);
+
+export const developmentTasks = pgTable(
+  "development_tasks",
+  {
+    id: uuid().primaryKey(),
+    title: text().notNull(),
+    approvedSpec: text("approved_spec").notNull(),
+    acceptanceCriteria: jsonb("acceptance_criteria").$type<DevelopmentAcceptanceCriteria>().notNull(),
+    status: text().notNull(),
+    baseCommit: text("base_commit").notNull(),
+    maxAttempts: integer("max_attempts").default(1).notNull(),
+    approvedAt: timestampColumn("approved_at").notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    check(
+      "development_tasks_status_check",
+      sql`${table.status} in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'blocked', 'failed', 'cancelled')`
+    ),
+    check(
+      "development_tasks_base_commit_check",
+      sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check("development_tasks_max_attempts_check", sql`${table.maxAttempts} = 1`),
+    check(
+      "development_tasks_acceptance_criteria_array_check",
+      sql`jsonb_typeof(${table.acceptanceCriteria}) = 'array' and jsonb_array_length(${table.acceptanceCriteria}) > 0`
+    ),
+    index("development_tasks_claim_idx").on(table.status, table.createdAt)
+  ]
+);
+
+export const developmentAttempts = pgTable(
+  "development_attempts",
+  {
+    id: uuid().primaryKey(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => developmentTasks.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    role: text().notNull(),
+    status: text().notNull(),
+    harnessAdapter: text("harness_adapter").notNull(),
+    modelProfile: text("model_profile").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    candidateCommit: text("candidate_commit"),
+    candidateRef: text("candidate_ref"),
+    sandboxId: text("sandbox_id").notNull(),
+    contextManifest: jsonb("context_manifest").$type<DevelopmentContextManifest>(),
+    contextDigest: text("context_digest"),
+    budget: jsonb().$type<DevelopmentBudget>().notNull(),
+    usage: jsonb().$type<DevelopmentUsage>().notNull(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestampColumn("lease_expires_at"),
+    leaseGeneration: integer("lease_generation").default(1).notNull(),
+    failureClass: text("failure_class"),
+    safeSummary: text("safe_summary"),
+    startedAt: timestampColumn("started_at").notNull(),
+    completedAt: timestampColumn("completed_at"),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_attempts_task_number_unique").on(table.taskId, table.attemptNumber),
+    check("development_attempts_number_check", sql`${table.attemptNumber} = 1`),
+    check("development_attempts_role_check", sql`${table.role} = 'implementer'`),
+    check(
+      "development_attempts_status_check",
+      sql`${table.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'succeeded', 'interrupted', 'failed', 'cancelled')`
+    ),
+    check("development_attempts_harness_check", sql`${table.harnessAdapter} = 'pi'`),
+    check(
+      "development_attempts_model_profile_check",
+      sql`${table.modelProfile} in ('fast', 'balanced', 'reasoning')`
+    ),
+    check(
+      "development_attempts_base_commit_check",
+      sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check(
+      "development_attempts_candidate_commit_check",
+      sql`${table.candidateCommit} is null or ${table.candidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check(
+      "development_attempts_candidate_pair_check",
+      sql`(${table.candidateCommit} is null and ${table.candidateRef} is null) or (${table.candidateCommit} is not null and ${table.candidateRef} is not null)`
+    ),
+    check(
+      "development_attempts_succeeded_candidate_check",
+      sql`(${table.status} = 'succeeded') = (${table.candidateCommit} is not null)`
+    ),
+    check(
+      "development_attempts_context_pair_check",
+      sql`(${table.contextManifest} is null and ${table.contextDigest} is null) or (${table.contextManifest} is not null and ${table.contextDigest} is not null)`
+    ),
+    check(
+      "development_attempts_context_manifest_object_check",
+      sql`${table.contextManifest} is null or jsonb_typeof(${table.contextManifest}) = 'object'`
+    ),
+    check(
+      "development_attempts_context_digest_check",
+      sql`${table.contextDigest} is null or ${table.contextDigest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check("development_attempts_budget_object_check", sql`jsonb_typeof(${table.budget}) = 'object'`),
+    check("development_attempts_usage_object_check", sql`jsonb_typeof(${table.usage}) = 'object'`),
+    check(
+      "development_attempts_lease_fields_check",
+      sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`
+    ),
+    check("development_attempts_lease_generation_check", sql`${table.leaseGeneration} > 0`),
+    check(
+      "development_attempts_completion_check",
+      sql`(${table.status} in ('succeeded', 'failed', 'cancelled') and ${table.completedAt} is not null) or (${table.status} not in ('succeeded', 'failed', 'cancelled') and ${table.completedAt} is null)`
+    ),
+    index("development_attempts_lease_idx")
+      .on(table.leaseExpiresAt)
+      .where(sql`${table.leaseExpiresAt} is not null`)
+  ]
+);
+
+export const developmentAttemptEvents = pgTable(
+  "development_attempt_events",
+  {
+    id: uuid().primaryKey(),
+    attemptId: uuid("attempt_id")
+      .notNull()
+      .references(() => developmentAttempts.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    sequence: integer().notNull(),
+    kind: text().notNull(),
+    status: text().notNull(),
+    safeMetadata: jsonb("safe_metadata").$type<JsonObject>().notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_attempt_events_attempt_sequence_unique").on(table.attemptId, table.sequence),
+    check("development_attempt_events_sequence_check", sql`${table.sequence} > 0`),
+    check(
+      "development_attempt_events_kind_check",
+      sql`${table.kind} in ('transition', 'harness', 'tool', 'test', 'git', 'budget', 'teardown')`
+    ),
+    check(
+      "development_attempt_events_status_check",
+      sql`${table.status} in ('started', 'success', 'failed', 'unknown', 'blocked')`
+    ),
+    check(
+      "development_attempt_events_metadata_object_check",
+      sql`jsonb_typeof(${table.safeMetadata}) = 'object'`
+    )
   ]
 );

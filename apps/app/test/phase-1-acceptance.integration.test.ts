@@ -197,7 +197,9 @@ describe("Phase 1 deterministic full-system acceptance fixture", () => {
       }
     };
     const registry = createProductionToolRegistry({ browser, calendar, gmail });
+    let runtimeNow = due.getTime() + 1_000;
     const gateway = createToolGateway({
+      clock: () => new Date(runtimeNow++),
       knownSecrets: [canary],
       persistence: createDatabaseToolPersistence(database),
       registry
@@ -218,7 +220,6 @@ describe("Phase 1 deterministic full-system acceptance fixture", () => {
       { data: structured({ confirmation: "CONF-001" }), kind: "complete", summary: "Confirmed and added to Calendar" }
     ];
     const contexts: string[] = [];
-    let runtimeNow = due.getTime() + 1_000;
     const runState = createRunState(database, [canary]);
     await expect(runState.claimRun("run-worker", new Date(runtimeNow), 60_000)).resolves.toMatchObject({ id: scheduledRun!.id });
     const runtime = createAgentRuntime({

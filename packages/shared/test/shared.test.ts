@@ -2,11 +2,24 @@ import { describe, expect, it } from "vitest";
 import {
   automationRunStatusSchema,
   automationRunTriggerSchema,
+  canTransitionDevelopmentAttempt,
+  canTransitionDevelopmentTask,
   canTransitionAutomationRun,
   commandStatusSchema,
   completionModeSchema,
   createSecretFreeJsonSchema,
   createSecretFreeTextSchema,
+  developmentAcceptanceCriteriaSchema,
+  developmentAttemptEventKindSchema,
+  developmentAttemptStatusSchema,
+  developmentBudgetSchema,
+  developmentContextManifestSchema,
+  developmentEventStatusSchema,
+  developmentRoleSchema,
+  developmentTaskStatusSchema,
+  developmentUsageSchema,
+  emptyDevelopmentUsage,
+  gitObjectIdSchema,
   idempotencyStateSchema,
   intentTypeSchema,
   isDurableJson,
@@ -20,7 +33,8 @@ import {
   redactText,
   sideEffectClassSchema,
   toolPolicySchema,
-  toolStatusSchema
+  toolStatusSchema,
+  workspaceRelativePathSchema
 } from "../src/index";
 
 describe("domain validation", () => {
@@ -49,6 +63,59 @@ describe("domain validation", () => {
     expect(jsonValueSchema.parse(value)).toEqual(value);
     expect(jsonObjectSchema.parse(value)).toEqual(value);
     expect(() => jsonValueSchema.parse(Number.POSITIVE_INFINITY)).toThrow();
+  });
+
+  it("validates the complete Phase 2A domain and transition policy", () => {
+    expect(developmentRoleSchema.parse("implementer")).toBe("implementer");
+    expect(developmentTaskStatusSchema.options).toHaveLength(8);
+    expect(developmentAttemptStatusSchema.options).toHaveLength(8);
+    expect(developmentAttemptEventKindSchema.options).toHaveLength(7);
+    expect(developmentEventStatusSchema.options).toHaveLength(5);
+    expect(gitObjectIdSchema.parse("a".repeat(40))).toHaveLength(40);
+    expect(gitObjectIdSchema.parse("a".repeat(64))).toHaveLength(64);
+    expect(() => gitObjectIdSchema.parse("short")).toThrow();
+    expect(workspaceRelativePathSchema.parse("packages/shared/src/domain.ts")).toContain("domain.ts");
+    for (const invalid of ["/absolute", "../escape", "a\\b", "a//b", "a/./b", ""]) {
+      expect(() => workspaceRelativePathSchema.parse(invalid)).toThrow();
+    }
+
+    const criteria = [
+      {
+        check: { executable: "pnpm" as const, timeoutMs: 1_000 },
+        description: "Run tests",
+        id: "tests"
+      }
+    ];
+    expect(developmentAcceptanceCriteriaSchema.parse(criteria)[0]?.check.arguments).toEqual([]);
+    expect(() => developmentAcceptanceCriteriaSchema.parse([...criteria, ...criteria])).toThrow(
+      "unique"
+    );
+    expect(
+      developmentBudgetSchema.parse({
+        maxCommandMs: 1,
+        maxCommandOutputBytes: 1,
+        maxContextBytes: 1,
+        maxCostUsdMicros: 0,
+        maxDiffBytes: 1,
+        maxModelInvocations: 1,
+        maxTokens: 1,
+        maxToolCalls: 1,
+        maxWallClockMs: 1,
+        maxWorkspaceBytes: 1
+      }).maxCostUsdMicros
+    ).toBe(0);
+    const usage = emptyDevelopmentUsage();
+    expect(developmentUsageSchema.parse(usage)).toEqual(usage);
+    expect(
+      developmentContextManifestSchema.parse({
+        entries: [{ blobId: "b".repeat(40), bytes: 1, path: "AGENTS.md", source: "authority" }],
+        totalBytes: 1
+      }).entries
+    ).toHaveLength(1);
+    expect(canTransitionDevelopmentTask("ready", "preparing")).toBe(true);
+    expect(canTransitionDevelopmentTask("candidate_ready", "failed")).toBe(false);
+    expect(canTransitionDevelopmentAttempt("preparing", "implementing")).toBe(true);
+    expect(canTransitionDevelopmentAttempt("succeeded", "failed")).toBe(false);
   });
 });
 

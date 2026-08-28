@@ -12,18 +12,18 @@ Current status:
 | Phase or milestone | Status |
 | --- | --- |
 | Phase 1 — ACT | **COMPLETE** |
-| Phase 2 — EVOLVE | **NOT YET IMPLEMENTED** |
-| Phase 2A — Development Harness Spike | **NEXT / NOT STARTED / NOT AUTHORIZED** |
-| Phase 2B — Independent Reviewer | **NOT STARTED** |
+| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2A COMPLETE** |
+| Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
+| Phase 2B — Independent Reviewer | **NEXT / NOT STARTED / NOT AUTHORIZED** |
 | Phase 2C — Autonomous Fix Loop | **NOT STARTED** |
 | Phase 2D — Auto-Merge + Deploy | **NOT STARTED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
 
-Approval of this documentation transition does not authorize Phase 2A code.
-Phase 2A is only the next milestone eligible for a separate user authorization.
-Each later milestone also requires separate authorization after review of the
-preceding milestone. No milestone passing implicitly starts the next one.
+Phase 2A was separately authorized by the user and completed on 2026-08-28.
+That completion does not authorize Phase 2B. Each later milestone requires
+separate authorization after review of the preceding milestone. No milestone
+passing implicitly starts the next one.
 
 [`implementation-plan.md`](implementation-plan.md) and
 [`phase-1-acceptance.md`](phase-1-acceptance.md) remain the historical Phase 1
@@ -606,6 +606,59 @@ proven.
 At acceptance, stop. The candidate must not be automatically reviewed, retried,
 merged, or deployed. Record exact evidence and request separate authorization
 for Phase 2B.
+
+## Phase 2A completion record — 2026-08-28
+
+Phase 2A is **COMPLETE** and stops at `candidate_ready`. The implemented slice
+contains only the three approved durable entities, one fenced Implementer
+attempt, the project-owned `DevelopmentHarness`, the Pi adapter, bounded context
+compilation, the host-level one-shot runner, Docker-isolated sandbox tools,
+trusted Git candidate capture, deterministic checks, reconciliation, and
+teardown.
+
+Durable and security evidence includes:
+
+- clean PostgreSQL migrations create `development_tasks`,
+  `development_attempts`, and append-only `development_attempt_events`, with no
+  Reviewer, CI, merge, deployment, capability-gap, or self-improvement tables;
+- exact base/candidate commits and the trusted attempt ref survive worktree and
+  container teardown;
+- transactional claim, heartbeat, generation fencing, stale-runner rejection,
+  expired-attempt recovery, Pi-session loss, sandbox loss, and the Git-ref/DB
+  crash window are covered by deterministic PostgreSQL and Git integration
+  tests;
+- a complete approved small-task fixture reaches `candidate_ready` through the
+  fake deterministic harness transport and the real no-network Docker sandbox;
+- the sandbox proves path/symlink/device/command isolation and absence of model,
+  Google, production-database, Docker-socket, SSH, and host Pi canaries;
+- Pi uses an in-memory task-local session, an explicit runner-owned resource
+  loader with project context/extensions/skills/prompts/themes disabled, no
+  built-in host tools, and only the eight approved project-owned tools; and
+- ACT packages/tool resolution are unchanged, and credential-free Compose
+  startup plus restart recovery remain healthy.
+
+Final quality evidence:
+
+- `pnpm install --frozen-lockfile`: pass;
+- `pnpm lint`: pass;
+- `pnpm typecheck`: pass;
+- `pnpm test`: 187 passed, 3 skipped opt-in tests;
+- `pnpm test:coverage`: exactly 100% statements (2287/2287), branches
+  (1483/1483), functions (570/570), and lines (2046/2046);
+- `pnpm build`: pass;
+- empty-database migrations, PostgreSQL integration/concurrency/fencing, and
+  `drizzle-kit check`: pass;
+- sandbox/security integration, Docker Compose config/build/runtime, migration
+  exit 0, credential-free health, and restart recovery: pass;
+- development-sandbox image builds and inspects as both `linux/amd64` and
+  `linux/arm64`;
+- `git diff --check` and the secret/generated-artifact/coverage-exclusion/
+  trust-scope/Phase 2B-3 authorization audits: pass.
+
+Normal acceptance uses no OpenAI/Pi provider account, Google account, public
+website, or personal data. A live provider smoke run remains explicit,
+credential-gated, and non-blocking as approved. There are no Phase 2A blockers.
+Phase 2B remains **NEXT / NOT STARTED / NOT AUTHORIZED**.
 
 # Phase 2B — Independent Reviewer
 
