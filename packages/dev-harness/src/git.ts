@@ -128,6 +128,24 @@ export class TrustedGit {
     });
   }
 
+  async diffCommits(baseCommit: string, candidateCommit: string, maxOutputBytes: number): Promise<string> {
+    const base = gitObjectIdSchema.parse(baseCommit);
+    const candidate = gitObjectIdSchema.parse(candidateCommit);
+    const parent = await this.git(["rev-parse", `${candidate}^`]);
+    validateCandidateRevision({ baseCommit: base, commit: candidate, parent });
+    return this.git(["diff", "--no-ext-diff", "--binary", base, candidate, "--"], {
+      maxOutputBytes,
+      trimOutput: false
+    });
+  }
+
+  async assertWorkspaceClean(workspacePath: string, expectedCommit: string): Promise<void> {
+    await this.verifyWorkspaceBase(workspacePath, expectedCommit);
+    if ((await this.status(workspacePath)).length > 0) {
+      throw new Error("Reviewer workspace mutated the exact candidate");
+    }
+  }
+
   async verifyWorkspaceSize(workspacePath: string, maxBytes: number): Promise<number> {
     assertManagedPath(this.workspaceRoot, workspacePath);
     if (!Number.isInteger(maxBytes) || maxBytes <= 0) {
@@ -264,6 +282,41 @@ export class TrustedGit {
     if (parent !== gitObjectIdSchema.parse(baseCommit)) {
       throw new Error("Trusted candidate ref has an unexpected parent");
     }
+    return { commit, ref };
+  }
+
+  reviewRetentionRef(reviewId: string): string {
+    if (!/^[0-9a-f-]{36}$/.test(reviewId)) throw new Error("Review ID is invalid");
+    return `refs/personal-agent/reviews/${reviewId}`;
+  }
+
+  async ensureReviewRetentionRef(reviewId: string, expectedCommit: string): Promise<CandidateRevision> {
+    const ref = this.reviewRetentionRef(reviewId);
+    const commit = gitObjectIdSchema.parse(expectedCommit);
+    await this.resolveCommit(commit);
+    try {
+      await this.git(["update-ref", ref, commit, ""]);
+    } catch {
+      const retained = await this.verifyReviewRetentionRef(reviewId, commit);
+      if (retained) return retained;
+      throw new Error("Review retention ref is corrupt");
+    }
+    return { commit, ref };
+  }
+
+  async verifyReviewRetentionRef(
+    reviewId: string,
+    expectedCommit: string
+  ): Promise<CandidateRevision | undefined> {
+    const ref = this.reviewRetentionRef(reviewId);
+    const expected = gitObjectIdSchema.parse(expectedCommit);
+    let commit: string;
+    try {
+      commit = gitObjectIdSchema.parse(await this.git(["rev-parse", "--verify", `${ref}^{commit}`]));
+    } catch {
+      return undefined;
+    }
+    if (commit !== expected) throw new Error("Review retention ref does not match the durable candidate");
     return { commit, ref };
   }
 

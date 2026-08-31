@@ -2,6 +2,9 @@ import type {
   DevelopmentAcceptanceCriteria,
   DevelopmentBudget,
   DevelopmentContextManifest,
+  DevelopmentReviewerContextManifest,
+  DevelopmentReviewerContextPolicy,
+  DevelopmentReviewFinding,
   DevelopmentUsage,
   JsonObject
 } from "@personal-agent/shared";
@@ -325,6 +328,7 @@ export const developmentTasks = pgTable(
     baseCommit: text("base_commit").notNull(),
     maxAttempts: integer("max_attempts").default(1).notNull(),
     approvedAt: timestampColumn("approved_at").notNull(),
+    authorityInvalidatedAt: timestampColumn("authority_invalidated_at"),
     createdAt: timestampColumn("created_at").defaultNow().notNull(),
     updatedAt: timestampColumn("updated_at").defaultNow().notNull()
   },
@@ -431,6 +435,155 @@ export const developmentAttempts = pgTable(
     index("development_attempts_lease_idx")
       .on(table.leaseExpiresAt)
       .where(sql`${table.leaseExpiresAt} is not null`)
+  ]
+);
+
+export const developmentReviews = pgTable(
+  "development_reviews",
+  {
+    id: uuid().primaryKey(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => developmentTasks.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    implementerAttemptId: uuid("implementer_attempt_id")
+      .notNull()
+      .references(() => developmentAttempts.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    role: text().default("reviewer").notNull(),
+    status: text().notNull(),
+    harnessAdapter: text("harness_adapter").notNull(),
+    modelProfile: text("model_profile").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    candidateCommit: text("candidate_commit").notNull(),
+    candidateRef: text("candidate_ref").notNull(),
+    retentionRef: text("retention_ref").notNull(),
+    sandboxId: text("sandbox_id").notNull(),
+    contextManifest: jsonb("context_manifest").$type<DevelopmentReviewerContextManifest>(),
+    contextDigest: text("context_digest"),
+    contextPolicy: jsonb("context_policy").$type<DevelopmentReviewerContextPolicy>().notNull(),
+    budget: jsonb().$type<DevelopmentBudget>().notNull(),
+    usage: jsonb().$type<DevelopmentUsage>().notNull(),
+    leaseOwner: text("lease_owner").notNull(),
+    leaseExpiresAt: timestampColumn("lease_expires_at").notNull(),
+    leaseGeneration: integer("lease_generation").default(1).notNull(),
+    cleanupStatus: text("cleanup_status").default("pending").notNull(),
+    decision: text(),
+    findings: jsonb().$type<DevelopmentReviewFinding[]>().default([]).notNull(),
+    failureClass: text("failure_class"),
+    safeSummary: text("safe_summary"),
+    startedAt: timestampColumn("started_at").notNull(),
+    completedAt: timestampColumn("completed_at"),
+    finalizedAt: timestampColumn("finalized_at"),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_reviews_task_unique").on(table.taskId),
+    unique("development_reviews_implementer_attempt_unique").on(table.implementerAttemptId),
+    check("development_reviews_role_check", sql`${table.role} = 'reviewer'`),
+    check(
+      "development_reviews_status_check",
+      sql`${table.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted', 'succeeded', 'failed')`
+    ),
+    check("development_reviews_harness_check", sql`${table.harnessAdapter} = 'pi'`),
+    check(
+      "development_reviews_model_profile_check",
+      sql`${table.modelProfile} in ('fast', 'balanced', 'reasoning')`
+    ),
+    check(
+      "development_reviews_base_commit_check",
+      sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check(
+      "development_reviews_candidate_commit_check",
+      sql`${table.candidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check(
+      "development_reviews_candidate_ref_check",
+      sql`${table.candidateRef} ~ '^refs/personal-agent/development-attempts/[0-9a-f-]{36}$'`
+    ),
+    check(
+      "development_reviews_retention_ref_check",
+      sql`${table.retentionRef} = 'refs/personal-agent/reviews/' || ${table.id}::text`
+    ),
+    check(
+      "development_reviews_context_pair_check",
+      sql`(${table.contextManifest} is null and ${table.contextDigest} is null) or (${table.contextManifest} is not null and ${table.contextDigest} is not null)`
+    ),
+    check(
+      "development_reviews_context_manifest_object_check",
+      sql`${table.contextManifest} is null or (jsonb_typeof(${table.contextManifest}) = 'object' and jsonb_exists(${table.contextManifest}, 'authorityReferences') and jsonb_typeof(${table.contextManifest}->'authorityReferences') = 'array' and jsonb_array_length(${table.contextManifest}->'authorityReferences') between 1 and 512)`
+    ),
+    check(
+      "development_reviews_context_digest_check",
+      sql`${table.contextDigest} is null or ${table.contextDigest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check("development_reviews_budget_object_check", sql`jsonb_typeof(${table.budget}) = 'object'`),
+    check(
+      "development_reviews_context_policy_object_check",
+      sql`jsonb_typeof(${table.contextPolicy}) = 'object'`
+    ),
+    check("development_reviews_usage_object_check", sql`jsonb_typeof(${table.usage}) = 'object'`),
+    check(
+      "development_reviews_findings_array_check",
+      sql`jsonb_typeof(${table.findings}) = 'array' and jsonb_array_length(${table.findings}) <= 64`
+    ),
+    check(
+      "development_reviews_decision_findings_check",
+      sql`(${table.decision} is null and jsonb_array_length(${table.findings}) = 0) or (${table.decision} = 'APPROVE' and jsonb_array_length(${table.findings}) = 0) or (${table.decision} = 'REQUEST_CHANGES' and jsonb_array_length(${table.findings}) between 1 and 64)`
+    ),
+    check(
+      "development_reviews_proposal_state_check",
+      sql`${table.decision} is null or ${table.status} in ('finalizing', 'succeeded', 'failed')`
+    ),
+    check(
+      "development_reviews_cleanup_status_check",
+      sql`${table.cleanupStatus} in ('pending', 'failed', 'succeeded')`
+    ),
+    check("development_reviews_lease_generation_check", sql`${table.leaseGeneration} > 0`),
+    check(
+      "development_reviews_completion_check",
+      sql`(${table.status} in ('succeeded', 'failed') and ${table.completedAt} is not null) or (${table.status} not in ('succeeded', 'failed') and ${table.completedAt} is null)`
+    ),
+    check(
+      "development_reviews_proposal_prerequisites_check",
+      sql`${table.status} not in ('finalizing', 'succeeded') or (${table.decision} is not null and ${table.contextDigest} is not null and ${table.contextManifest} is not null)`
+    ),
+    check(
+      "development_reviews_finalization_check",
+      sql`(${table.status} = 'succeeded' and ${table.decision} is not null and ${table.contextDigest} is not null and ${table.contextManifest} is not null and ${table.cleanupStatus} = 'succeeded' and ${table.failureClass} is null and ${table.safeSummary} is not null and ${table.completedAt} is not null and ${table.finalizedAt} is not null) or (${table.status} <> 'succeeded' and ${table.finalizedAt} is null)`
+    ),
+    index("development_reviews_claim_idx").on(table.status, table.leaseExpiresAt)
+  ]
+);
+
+export const developmentReviewEvents = pgTable(
+  "development_review_events",
+  {
+    id: uuid().primaryKey(),
+    reviewId: uuid("review_id")
+      .notNull()
+      .references(() => developmentReviews.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    sequence: integer().notNull(),
+    kind: text().notNull(),
+    status: text().notNull(),
+    safeMetadata: jsonb("safe_metadata").$type<JsonObject>().notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_review_events_review_sequence_unique").on(table.reviewId, table.sequence),
+    check("development_review_events_sequence_check", sql`${table.sequence} > 0`),
+    check(
+      "development_review_events_kind_check",
+      sql`${table.kind} in ('transition', 'harness', 'tool', 'check', 'integrity', 'cleanup', 'finalization')`
+    ),
+    check(
+      "development_review_events_status_check",
+      sql`${table.status} in ('started', 'success', 'failed', 'unknown', 'blocked')`
+    ),
+    check(
+      "development_review_events_metadata_object_check",
+      sql`jsonb_typeof(${table.safeMetadata}) = 'object'`
+    )
   ]
 );
 

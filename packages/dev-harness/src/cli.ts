@@ -1,12 +1,14 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createDatabase, createDevelopmentRepositories } from "@personal-agent/db";
+import { createDatabase, createDevelopmentRepositories, createReviewRepositories } from "@personal-agent/db";
 import { developmentAcceptanceCriteriaSchema, type DevelopmentBudget } from "@personal-agent/shared";
 import { z } from "zod";
 import { DevelopmentCoordinator } from "./coordinator.js";
 import { DevelopmentContextCompiler } from "./context-compiler.js";
 import { TrustedGit } from "./git.js";
 import { OfficialPiTransport, PiDevelopmentHarness, type PiModelConfiguration } from "./pi-adapter.js";
+import { ReviewerContextCompiler } from "./reviewer-context-compiler.js";
+import { ReviewerCoordinator } from "./reviewer-coordinator.js";
 import { DockerSandboxManager } from "./sandbox.js";
 
 const defaultBudget: DevelopmentBudget = {
@@ -155,7 +157,32 @@ export async function runDevelopmentCli(
     if (command === "recover-one") {
       return coordinator.recoverOne(Number(values.get("lease-ms") ?? 90_000));
     }
-    throw new Error("Expected task-create, run-once, or recover-one");
+    if (command === "review-once" || command === "recover-review") {
+      const reviewer = new ReviewerCoordinator({
+        contextCompiler: new ReviewerContextCompiler(git),
+        developmentPersistence: persistence,
+        git,
+        harness: new PiDevelopmentHarness(
+          new OfficialPiTransport({ agentDirectory, models: modelConfiguration(environment) })
+        ),
+        knownSecrets,
+        persistence: createReviewRepositories(connection.database, knownSecrets),
+        runnerId: environment.DEVELOPMENT_RUNNER_ID ?? `development-reviewer-${process.pid}`,
+        sandboxManager
+      });
+      const policy = {
+        budget: defaultBudget,
+        forbiddenPaths: list(values, "forbidden", [".git", ".pi", ".secrets", "browser-profile"]),
+        leaseDurationMs: Number(values.get("lease-ms") ?? 90_000),
+        modelProfile: z.enum(["fast", "balanced", "reasoning"]).parse(values.get("profile") ?? "reasoning"),
+        readablePaths: list(values, "readable", ["AGENTS.md", "docs"]),
+        relevantPaths: list(values, "relevant", [])
+      };
+      return command === "review-once"
+        ? reviewer.runOne(policy)
+        : reviewer.recoverOne(policy.leaseDurationMs);
+    }
+    throw new Error("Expected task-create, run-once, recover-one, review-once, or recover-review");
   } finally {
     await connection.close();
   }

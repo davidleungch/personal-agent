@@ -1,2 +1,0 @@
-CREATE INDEX "automation_runs_lease_expiry_idx" ON "automation_runs" USING btree ("lease_expires_at") WHERE "automation_runs"."lease_expires_at" is not null;--> statement-breakpoint
-CREATE INDEX "automations_due_idx" ON "automations" USING btree ("enabled","next_run_at");

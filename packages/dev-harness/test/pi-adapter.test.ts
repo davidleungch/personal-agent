@@ -71,6 +71,15 @@ const context: DevelopmentContext = {
   taskTitle: "Fixture"
 };
 
+const reviewerContext: DevelopmentContext = {
+  ...context,
+  allowedPaths: ["src"],
+  candidateCommit: "c".repeat(40),
+  candidateDiff: "diff --git a/src/a.ts b/src/a.ts",
+  deterministicEvidence: "fixture passed",
+  role: "reviewer"
+};
+
 const toolInputs: Record<string, unknown> = {
   "git.diff": {},
   "git.status": {},
@@ -326,6 +335,79 @@ async function events(execution: Awaited<ReturnType<PiDevelopmentHarness["execut
   return result;
 }
 
+describe("official Pi Reviewer structured result", () => {
+  it("captures a strict terminating Reviewer submission and rejects absent or duplicate submissions", async () => {
+    const reviewTools: DevelopmentToolSet = {
+      names: ["sandbox.read", "git.diff", "review.run_check", "review.submit"],
+      invoke: async (name) => ({ content: `review ${name}`, safeMetadata: {} })
+    };
+    sdkState.createAgentSession.mockImplementationOnce(async (options: Record<string, unknown>) => ({
+      session: {
+        abort: vi.fn(async () => undefined),
+        dispose: vi.fn(),
+        messages: [assistant()],
+        prompt: vi.fn(async (prompt: string) => {
+          expect(prompt).toContain("Exact candidate commit");
+          expect(prompt).toContain("review.submit");
+          const definitions = options.customTools as FakeToolDefinition[];
+          expect(definitions.map((definition) => definition.name)).toEqual([
+            "sandbox.read", "git.diff", "review.run_check", "review.submit"
+          ]);
+          await definitions.find((definition) => definition.name === "review.run_check")!
+            .execute("check", { acceptanceCriterionId: "fixture" });
+          const submitted = await definitions.find((definition) => definition.name === "review.submit")!
+            .execute("submit", { decision: "APPROVE", findings: [] });
+          expect(submitted).toMatchObject({ terminate: true });
+        }),
+        subscribe: vi.fn(() => vi.fn())
+      }
+    }));
+    const transport = new OfficialPiTransport({
+      agentDirectory: "/tmp/reviewer-pi",
+      models: {
+        balanced: { modelId: "id", providerId: "provider" },
+        fast: { modelId: "id", providerId: "provider" },
+        reasoning: { modelId: "id", providerId: "provider" }
+      }
+    });
+    await expect(transport.run({
+      context: { ...reviewerContext, forbiddenPaths: [] },
+      emit: () => undefined,
+      modelProfile: "reasoning",
+      signal: new AbortController().signal,
+      tools: reviewTools
+    })).resolves.toMatchObject({ outcome: "completion_proposed", review: { decision: "APPROVE", findings: [] } });
+    expect((sdkState.loaders.at(-1)?.options.systemPromptOverride as () => string)()).toContain("independent Phase 2B");
+
+    sdkState.createAgentSession.mockImplementationOnce(async () => ({
+      session: {
+        abort: vi.fn(async () => undefined), dispose: vi.fn(), messages: [assistant()],
+        prompt: vi.fn(async () => undefined), subscribe: vi.fn(() => vi.fn())
+      }
+    }));
+    await expect(transport.run({
+      context: reviewerContext, emit: () => undefined, modelProfile: "fast",
+      signal: new AbortController().signal, tools: reviewTools
+    })).resolves.toMatchObject({ outcome: "malformed_output" });
+
+    sdkState.createAgentSession.mockImplementationOnce(async (options: Record<string, unknown>) => ({
+      session: {
+        abort: vi.fn(async () => undefined), dispose: vi.fn(), messages: [assistant()],
+        prompt: vi.fn(async () => {
+          const submit = (options.customTools as FakeToolDefinition[]).find((definition) => definition.name === "review.submit")!;
+          await submit.execute("one", { decision: "APPROVE", findings: [] });
+          await expect(submit.execute("two", { decision: "APPROVE", findings: [] })).rejects.toThrow("more than once");
+        }),
+        subscribe: vi.fn(() => vi.fn())
+      }
+    }));
+    await expect(transport.run({
+      context: reviewerContext, emit: () => undefined, modelProfile: "fast",
+      signal: new AbortController().signal, tools: reviewTools
+    })).resolves.toMatchObject({ outcome: "completion_proposed" });
+  });
+});
+
 describe("project-owned Pi DevelopmentHarness", () => {
   it("normalizes completion and explicit abort", async () => {
     let transportSignal: AbortSignal | undefined;
@@ -389,6 +471,42 @@ describe("project-owned Pi DevelopmentHarness", () => {
     await blocking.abort(active.executionId);
     release();
     expect((await collecting).at(-1)).toMatchObject({ failureClass: "aborted", kind: "failed" });
+  });
+
+  it("normalizes Reviewer completion and malformed structured transport output", async () => {
+    const approved = new PiDevelopmentHarness({
+      run: async () => ({
+        outcome: "completion_proposed",
+        review: { decision: "APPROVE", findings: [] },
+        usage: zeroUsageFixture()
+      })
+    });
+    const approvedEvents = await events(await approved.execute({
+      attemptId: "00000000-0000-4000-8000-000000000010",
+      budget,
+      context: reviewerContext,
+      modelProfile: "reasoning",
+      role: "reviewer",
+      tools: { names: ["review.submit"], invoke: async () => ({ content: "", safeMetadata: {} }) }
+    }));
+    expect(approvedEvents.at(-1)).toMatchObject({
+      kind: "completed", result: "review_proposed", review: { decision: "APPROVE" }
+    });
+
+    for (const result of [
+      { outcome: "completion_proposed" as const, usage: zeroUsageFixture() },
+      { outcome: "malformed_output" as const, usage: zeroUsageFixture() }
+    ]) {
+      const harness = new PiDevelopmentHarness({ run: async () => result });
+      expect((await events(await harness.execute({
+        attemptId: "00000000-0000-4000-8000-000000000011",
+        budget,
+        context: reviewerContext,
+        modelProfile: "fast",
+        role: "reviewer",
+        tools: { names: ["review.submit"], invoke: async () => ({ content: "", safeMetadata: {} }) }
+      }))).at(-1)).toMatchObject({ failureClass: "malformed_output", kind: "failed" });
+    }
   });
 
   it("normalizes provider failure, thrown transport errors, caller cancellation, timeout, and role rejection", async () => {
@@ -489,7 +607,7 @@ describe("project-owned Pi DevelopmentHarness", () => {
         role: "reviewer" as never,
         tools: tools()
       })
-    ).rejects.toThrow("Implementer");
+    ).rejects.toThrow("role does not match");
 
     const nonError = new PiDevelopmentHarness({
       run: async () => Promise.reject("non-error")

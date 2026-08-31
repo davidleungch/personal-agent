@@ -106,6 +106,20 @@ describe("domain validation", () => {
     ).toBe(0);
     const usage = emptyDevelopmentUsage();
     expect(developmentUsageSchema.parse(usage)).toEqual(usage);
+    expect(() => developmentBudgetSchema.parse({
+      maxCommandMs: 1,
+      maxCommandOutputBytes: 1,
+      maxContextBytes: 1,
+      maxCostUsdMicros: 0,
+      maxDiffBytes: 1,
+      maxModelInvocations: 1,
+      maxTokens: 1,
+      maxToolCalls: 1,
+      maxWallClockMs: 1,
+      maxWorkspaceBytes: 1,
+      unsupported: true
+    })).toThrow();
+    expect(() => developmentUsageSchema.parse({ ...usage, unsupported: 1 })).toThrow();
     expect(
       developmentContextManifestSchema.parse({
         entries: [{ blobId: "b".repeat(40), bytes: 1, path: "AGENTS.md", source: "authority" }],

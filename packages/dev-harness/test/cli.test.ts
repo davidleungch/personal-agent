@@ -12,6 +12,8 @@ const state = vi.hoisted(() => ({
   harnessTransports: [] as unknown[],
   piArguments: [] as unknown[],
   recoverOne: vi.fn(async () => ({ recovered: true })),
+  recoverReview: vi.fn(async (input) => ({ recoveredReview: input })),
+  reviewOne: vi.fn(async (input) => ({ reviewed: input })),
   runOne: vi.fn(async (input) => ({ ran: input })),
   sandboxArguments: [] as unknown[]
 }));
@@ -21,7 +23,8 @@ vi.mock("@personal-agent/db", () => ({
   createDevelopmentRepositories: (_database: unknown, secrets: unknown) => {
     state.databaseSecrets.push(secrets);
     return {};
-  }
+  },
+  createReviewRepositories: () => ({})
 }));
 vi.mock("../src/coordinator.js", () => ({
   DevelopmentCoordinator: class {
@@ -35,6 +38,15 @@ vi.mock("../src/coordinator.js", () => ({
 }));
 vi.mock("../src/context-compiler.js", () => ({
   DevelopmentContextCompiler: class {}
+}));
+vi.mock("../src/reviewer-context-compiler.js", () => ({
+  ReviewerContextCompiler: class {}
+}));
+vi.mock("../src/reviewer-coordinator.js", () => ({
+  ReviewerCoordinator: class {
+    recoverOne = state.recoverReview;
+    runOne = state.reviewOne;
+  }
 }));
 vi.mock("../src/git.js", () => ({
   TrustedGit: class {
@@ -73,6 +85,8 @@ beforeEach(() => {
   }
   state.createApprovedTask.mockResolvedValue({ created: true });
   state.recoverOne.mockResolvedValue({ recovered: true });
+  state.recoverReview.mockResolvedValue({ recoveredReview: true });
+  state.reviewOne.mockResolvedValue({ reviewed: true });
   state.runOne.mockResolvedValue({ ran: true });
 });
 
@@ -224,6 +238,20 @@ describe("host-level development runner CLI", () => {
         reasoning: { modelId: "fallback-reasoning", providerId: "openai" }
       }
     });
+
+    await expect(runDevelopmentCli([
+      "review-once", "--readable", "src,docs", "--forbidden", ".git",
+      "--lease-ms", "2222", "--profile", "fast", "--relevant", "src/a.ts"
+    ], environment)).resolves.toEqual({ reviewed: true });
+    expect(state.reviewOne).toHaveBeenCalledWith(expect.objectContaining({
+      forbiddenPaths: [".git"],
+      leaseDurationMs: 2222,
+      modelProfile: "fast",
+      readablePaths: ["src", "docs"],
+      relevantPaths: ["src/a.ts"]
+    }));
+    await expect(runDevelopmentCli(["recover-review"], environment)).resolves.toEqual({ recoveredReview: true });
+    expect(state.recoverReview).toHaveBeenCalledWith(90_000);
   });
 
   it("uses defaults and rejects malformed options, missing inputs, invalid auth, and unknown commands", async () => {
@@ -268,6 +296,11 @@ describe("host-level development runner CLI", () => {
         relevantPaths: []
       })
     );
+    await expect(runDevelopmentCli(["review-once"], {
+      DATABASE_URL: databaseUrl,
+      DEVELOPMENT_PI_AGENT_DIR: directory
+    })).resolves.toEqual({ reviewed: true });
+
     expect(state.piArguments.at(-1)).toMatchObject({
       models: {
         balanced: { modelId: "gpt-5.6-terra", providerId: "openai" },

@@ -1,5 +1,5 @@
 {
-  "id": "010dbaf8-55bf-42b7-bd09-ce5db3deb6ed",
+  "id": "682b4aaf-10f7-4d4c-bfb0-cb8f65875153",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -185,6 +185,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "automation_runs_lease_expiry_idx": {
+          "name": "automation_runs_lease_expiry_idx",
+          "columns": [
+            {
+              "expression": "lease_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"automation_runs\".\"lease_expires_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -340,7 +356,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "automations_due_idx": {
+          "name": "automations_due_idx",
+          "columns": [
+            {
+              "expression": "enabled",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "next_run_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -353,6 +391,10 @@
         "automations_schedule_check": {
           "name": "automations_schedule_check",
           "value": "\"automations\".\"schedule\" ~ '^[^[:space:]]+([[:space:]]+[^[:space:]]+){4}$'"
+        },
+        "automations_completion_mode_check": {
+          "name": "automations_completion_mode_check",
+          "value": "\"automations\".\"completion_mode\" in ('continue', 'stop_after_success')"
         },
         "automations_version_check": {
           "name": "automations_version_check",
@@ -483,6 +525,940 @@
         "command_requests_claim_fields_check": {
           "name": "command_requests_claim_fields_check",
           "value": "(\"command_requests\".\"claimed_by\" is null and \"command_requests\".\"claimed_at\" is null and \"command_requests\".\"lease_expires_at\" is null) or (\"command_requests\".\"claimed_by\" is not null and \"command_requests\".\"claimed_at\" is not null and \"command_requests\".\"lease_expires_at\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.development_attempt_events": {
+      "name": "development_attempt_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "attempt_id": {
+          "name": "attempt_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sequence": {
+          "name": "sequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "safe_metadata": {
+          "name": "safe_metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "development_attempt_events_attempt_id_development_attempts_id_fk": {
+          "name": "development_attempt_events_attempt_id_development_attempts_id_fk",
+          "tableFrom": "development_attempt_events",
+          "tableTo": "development_attempts",
+          "columnsFrom": [
+            "attempt_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "development_attempt_events_attempt_sequence_unique": {
+          "name": "development_attempt_events_attempt_sequence_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "attempt_id",
+            "sequence"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "development_attempt_events_sequence_check": {
+          "name": "development_attempt_events_sequence_check",
+          "value": "\"development_attempt_events\".\"sequence\" > 0"
+        },
+        "development_attempt_events_kind_check": {
+          "name": "development_attempt_events_kind_check",
+          "value": "\"development_attempt_events\".\"kind\" in ('transition', 'harness', 'tool', 'test', 'git', 'budget', 'teardown')"
+        },
+        "development_attempt_events_status_check": {
+          "name": "development_attempt_events_status_check",
+          "value": "\"development_attempt_events\".\"status\" in ('started', 'success', 'failed', 'unknown', 'blocked')"
+        },
+        "development_attempt_events_metadata_object_check": {
+          "name": "development_attempt_events_metadata_object_check",
+          "value": "jsonb_typeof(\"development_attempt_events\".\"safe_metadata\") = 'object'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.development_attempts": {
+      "name": "development_attempts",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attempt_number": {
+          "name": "attempt_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "harness_adapter": {
+          "name": "harness_adapter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_profile": {
+          "name": "model_profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_commit": {
+          "name": "base_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "candidate_commit": {
+          "name": "candidate_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "candidate_ref": {
+          "name": "candidate_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sandbox_id": {
+          "name": "sandbox_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "context_manifest": {
+          "name": "context_manifest",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_digest": {
+          "name": "context_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "budget": {
+          "name": "budget",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usage": {
+          "name": "usage",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_owner": {
+          "name": "lease_owner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lease_expires_at": {
+          "name": "lease_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lease_generation": {
+          "name": "lease_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "failure_class": {
+          "name": "failure_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "safe_summary": {
+          "name": "safe_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "development_attempts_lease_idx": {
+          "name": "development_attempts_lease_idx",
+          "columns": [
+            {
+              "expression": "lease_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"development_attempts\".\"lease_expires_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "development_attempts_task_id_development_tasks_id_fk": {
+          "name": "development_attempts_task_id_development_tasks_id_fk",
+          "tableFrom": "development_attempts",
+          "tableTo": "development_tasks",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "development_attempts_task_number_unique": {
+          "name": "development_attempts_task_number_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "task_id",
+            "attempt_number"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "development_attempts_number_check": {
+          "name": "development_attempts_number_check",
+          "value": "\"development_attempts\".\"attempt_number\" = 1"
+        },
+        "development_attempts_role_check": {
+          "name": "development_attempts_role_check",
+          "value": "\"development_attempts\".\"role\" = 'implementer'"
+        },
+        "development_attempts_status_check": {
+          "name": "development_attempts_status_check",
+          "value": "\"development_attempts\".\"status\" in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'succeeded', 'interrupted', 'failed', 'cancelled')"
+        },
+        "development_attempts_harness_check": {
+          "name": "development_attempts_harness_check",
+          "value": "\"development_attempts\".\"harness_adapter\" = 'pi'"
+        },
+        "development_attempts_model_profile_check": {
+          "name": "development_attempts_model_profile_check",
+          "value": "\"development_attempts\".\"model_profile\" in ('fast', 'balanced', 'reasoning')"
+        },
+        "development_attempts_base_commit_check": {
+          "name": "development_attempts_base_commit_check",
+          "value": "\"development_attempts\".\"base_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_attempts_candidate_commit_check": {
+          "name": "development_attempts_candidate_commit_check",
+          "value": "\"development_attempts\".\"candidate_commit\" is null or \"development_attempts\".\"candidate_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_attempts_candidate_pair_check": {
+          "name": "development_attempts_candidate_pair_check",
+          "value": "(\"development_attempts\".\"candidate_commit\" is null and \"development_attempts\".\"candidate_ref\" is null) or (\"development_attempts\".\"candidate_commit\" is not null and \"development_attempts\".\"candidate_ref\" is not null)"
+        },
+        "development_attempts_succeeded_candidate_check": {
+          "name": "development_attempts_succeeded_candidate_check",
+          "value": "(\"development_attempts\".\"status\" = 'succeeded') = (\"development_attempts\".\"candidate_commit\" is not null)"
+        },
+        "development_attempts_context_pair_check": {
+          "name": "development_attempts_context_pair_check",
+          "value": "(\"development_attempts\".\"context_manifest\" is null and \"development_attempts\".\"context_digest\" is null) or (\"development_attempts\".\"context_manifest\" is not null and \"development_attempts\".\"context_digest\" is not null)"
+        },
+        "development_attempts_context_manifest_object_check": {
+          "name": "development_attempts_context_manifest_object_check",
+          "value": "\"development_attempts\".\"context_manifest\" is null or jsonb_typeof(\"development_attempts\".\"context_manifest\") = 'object'"
+        },
+        "development_attempts_context_digest_check": {
+          "name": "development_attempts_context_digest_check",
+          "value": "\"development_attempts\".\"context_digest\" is null or \"development_attempts\".\"context_digest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "development_attempts_budget_object_check": {
+          "name": "development_attempts_budget_object_check",
+          "value": "jsonb_typeof(\"development_attempts\".\"budget\") = 'object'"
+        },
+        "development_attempts_usage_object_check": {
+          "name": "development_attempts_usage_object_check",
+          "value": "jsonb_typeof(\"development_attempts\".\"usage\") = 'object'"
+        },
+        "development_attempts_lease_fields_check": {
+          "name": "development_attempts_lease_fields_check",
+          "value": "(\"development_attempts\".\"lease_owner\" is null and \"development_attempts\".\"lease_expires_at\" is null) or (\"development_attempts\".\"lease_owner\" is not null and \"development_attempts\".\"lease_expires_at\" is not null)"
+        },
+        "development_attempts_lease_generation_check": {
+          "name": "development_attempts_lease_generation_check",
+          "value": "\"development_attempts\".\"lease_generation\" > 0"
+        },
+        "development_attempts_completion_check": {
+          "name": "development_attempts_completion_check",
+          "value": "(\"development_attempts\".\"status\" in ('succeeded', 'failed', 'cancelled') and \"development_attempts\".\"completed_at\" is not null) or (\"development_attempts\".\"status\" not in ('succeeded', 'failed', 'cancelled') and \"development_attempts\".\"completed_at\" is null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.development_review_events": {
+      "name": "development_review_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "review_id": {
+          "name": "review_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sequence": {
+          "name": "sequence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "safe_metadata": {
+          "name": "safe_metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "development_review_events_review_id_development_reviews_id_fk": {
+          "name": "development_review_events_review_id_development_reviews_id_fk",
+          "tableFrom": "development_review_events",
+          "tableTo": "development_reviews",
+          "columnsFrom": [
+            "review_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "development_review_events_review_sequence_unique": {
+          "name": "development_review_events_review_sequence_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "review_id",
+            "sequence"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "development_review_events_sequence_check": {
+          "name": "development_review_events_sequence_check",
+          "value": "\"development_review_events\".\"sequence\" > 0"
+        },
+        "development_review_events_kind_check": {
+          "name": "development_review_events_kind_check",
+          "value": "\"development_review_events\".\"kind\" in ('transition', 'harness', 'tool', 'check', 'integrity', 'cleanup', 'finalization')"
+        },
+        "development_review_events_status_check": {
+          "name": "development_review_events_status_check",
+          "value": "\"development_review_events\".\"status\" in ('started', 'success', 'failed', 'unknown', 'blocked')"
+        },
+        "development_review_events_metadata_object_check": {
+          "name": "development_review_events_metadata_object_check",
+          "value": "jsonb_typeof(\"development_review_events\".\"safe_metadata\") = 'object'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.development_reviews": {
+      "name": "development_reviews",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "implementer_attempt_id": {
+          "name": "implementer_attempt_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'reviewer'"
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "harness_adapter": {
+          "name": "harness_adapter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_profile": {
+          "name": "model_profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_commit": {
+          "name": "base_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "candidate_commit": {
+          "name": "candidate_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "candidate_ref": {
+          "name": "candidate_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "retention_ref": {
+          "name": "retention_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sandbox_id": {
+          "name": "sandbox_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "context_manifest": {
+          "name": "context_manifest",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_digest": {
+          "name": "context_digest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "context_policy": {
+          "name": "context_policy",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "budget": {
+          "name": "budget",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usage": {
+          "name": "usage",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_owner": {
+          "name": "lease_owner",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_expires_at": {
+          "name": "lease_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_generation": {
+          "name": "lease_generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "cleanup_status": {
+          "name": "cleanup_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "findings": {
+          "name": "findings",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "failure_class": {
+          "name": "failure_class",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "safe_summary": {
+          "name": "safe_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finalized_at": {
+          "name": "finalized_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "development_reviews_claim_idx": {
+          "name": "development_reviews_claim_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "lease_expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "development_reviews_task_id_development_tasks_id_fk": {
+          "name": "development_reviews_task_id_development_tasks_id_fk",
+          "tableFrom": "development_reviews",
+          "tableTo": "development_tasks",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
+        },
+        "development_reviews_implementer_attempt_id_development_attempts_id_fk": {
+          "name": "development_reviews_implementer_attempt_id_development_attempts_id_fk",
+          "tableFrom": "development_reviews",
+          "tableTo": "development_attempts",
+          "columnsFrom": [
+            "implementer_attempt_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "development_reviews_task_unique": {
+          "name": "development_reviews_task_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "task_id"
+          ]
+        },
+        "development_reviews_implementer_attempt_unique": {
+          "name": "development_reviews_implementer_attempt_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "implementer_attempt_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "development_reviews_role_check": {
+          "name": "development_reviews_role_check",
+          "value": "\"development_reviews\".\"role\" = 'reviewer'"
+        },
+        "development_reviews_status_check": {
+          "name": "development_reviews_status_check",
+          "value": "\"development_reviews\".\"status\" in ('preparing', 'reviewing', 'finalizing', 'interrupted', 'succeeded', 'failed')"
+        },
+        "development_reviews_harness_check": {
+          "name": "development_reviews_harness_check",
+          "value": "\"development_reviews\".\"harness_adapter\" = 'pi'"
+        },
+        "development_reviews_model_profile_check": {
+          "name": "development_reviews_model_profile_check",
+          "value": "\"development_reviews\".\"model_profile\" in ('fast', 'balanced', 'reasoning')"
+        },
+        "development_reviews_base_commit_check": {
+          "name": "development_reviews_base_commit_check",
+          "value": "\"development_reviews\".\"base_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_reviews_candidate_commit_check": {
+          "name": "development_reviews_candidate_commit_check",
+          "value": "\"development_reviews\".\"candidate_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_reviews_candidate_ref_check": {
+          "name": "development_reviews_candidate_ref_check",
+          "value": "\"development_reviews\".\"candidate_ref\" ~ '^refs/personal-agent/development-attempts/[0-9a-f-]{36}$'"
+        },
+        "development_reviews_retention_ref_check": {
+          "name": "development_reviews_retention_ref_check",
+          "value": "\"development_reviews\".\"retention_ref\" = 'refs/personal-agent/reviews/' || \"development_reviews\".\"id\"::text"
+        },
+        "development_reviews_context_pair_check": {
+          "name": "development_reviews_context_pair_check",
+          "value": "(\"development_reviews\".\"context_manifest\" is null and \"development_reviews\".\"context_digest\" is null) or (\"development_reviews\".\"context_manifest\" is not null and \"development_reviews\".\"context_digest\" is not null)"
+        },
+        "development_reviews_context_manifest_object_check": {
+          "name": "development_reviews_context_manifest_object_check",
+          "value": "\"development_reviews\".\"context_manifest\" is null or (jsonb_typeof(\"development_reviews\".\"context_manifest\") = 'object' and jsonb_exists(\"development_reviews\".\"context_manifest\", 'authorityReferences') and jsonb_typeof(\"development_reviews\".\"context_manifest\"->'authorityReferences') = 'array' and jsonb_array_length(\"development_reviews\".\"context_manifest\"->'authorityReferences') between 1 and 512)"
+        },
+        "development_reviews_context_digest_check": {
+          "name": "development_reviews_context_digest_check",
+          "value": "\"development_reviews\".\"context_digest\" is null or \"development_reviews\".\"context_digest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "development_reviews_budget_object_check": {
+          "name": "development_reviews_budget_object_check",
+          "value": "jsonb_typeof(\"development_reviews\".\"budget\") = 'object'"
+        },
+        "development_reviews_context_policy_object_check": {
+          "name": "development_reviews_context_policy_object_check",
+          "value": "jsonb_typeof(\"development_reviews\".\"context_policy\") = 'object'"
+        },
+        "development_reviews_usage_object_check": {
+          "name": "development_reviews_usage_object_check",
+          "value": "jsonb_typeof(\"development_reviews\".\"usage\") = 'object'"
+        },
+        "development_reviews_findings_array_check": {
+          "name": "development_reviews_findings_array_check",
+          "value": "jsonb_typeof(\"development_reviews\".\"findings\") = 'array' and jsonb_array_length(\"development_reviews\".\"findings\") <= 64"
+        },
+        "development_reviews_decision_findings_check": {
+          "name": "development_reviews_decision_findings_check",
+          "value": "(\"development_reviews\".\"decision\" is null and jsonb_array_length(\"development_reviews\".\"findings\") = 0) or (\"development_reviews\".\"decision\" = 'APPROVE' and jsonb_array_length(\"development_reviews\".\"findings\") = 0) or (\"development_reviews\".\"decision\" = 'REQUEST_CHANGES' and jsonb_array_length(\"development_reviews\".\"findings\") between 1 and 64)"
+        },
+        "development_reviews_proposal_state_check": {
+          "name": "development_reviews_proposal_state_check",
+          "value": "\"development_reviews\".\"decision\" is null or \"development_reviews\".\"status\" in ('finalizing', 'succeeded', 'failed')"
+        },
+        "development_reviews_cleanup_status_check": {
+          "name": "development_reviews_cleanup_status_check",
+          "value": "\"development_reviews\".\"cleanup_status\" in ('pending', 'failed', 'succeeded')"
+        },
+        "development_reviews_lease_generation_check": {
+          "name": "development_reviews_lease_generation_check",
+          "value": "\"development_reviews\".\"lease_generation\" > 0"
+        },
+        "development_reviews_completion_check": {
+          "name": "development_reviews_completion_check",
+          "value": "(\"development_reviews\".\"status\" in ('succeeded', 'failed') and \"development_reviews\".\"completed_at\" is not null) or (\"development_reviews\".\"status\" not in ('succeeded', 'failed') and \"development_reviews\".\"completed_at\" is null)"
+        },
+        "development_reviews_proposal_prerequisites_check": {
+          "name": "development_reviews_proposal_prerequisites_check",
+          "value": "\"development_reviews\".\"status\" not in ('finalizing', 'succeeded') or (\"development_reviews\".\"decision\" is not null and \"development_reviews\".\"context_digest\" is not null and \"development_reviews\".\"context_manifest\" is not null)"
+        },
+        "development_reviews_finalization_check": {
+          "name": "development_reviews_finalization_check",
+          "value": "(\"development_reviews\".\"status\" = 'succeeded' and \"development_reviews\".\"decision\" is not null and \"development_reviews\".\"context_digest\" is not null and \"development_reviews\".\"context_manifest\" is not null and \"development_reviews\".\"cleanup_status\" = 'succeeded' and \"development_reviews\".\"failure_class\" is null and \"development_reviews\".\"safe_summary\" is not null and \"development_reviews\".\"completed_at\" is not null and \"development_reviews\".\"finalized_at\" is not null) or (\"development_reviews\".\"status\" <> 'succeeded' and \"development_reviews\".\"finalized_at\" is null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.development_tasks": {
+      "name": "development_tasks",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "approved_spec": {
+          "name": "approved_spec",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "acceptance_criteria": {
+          "name": "acceptance_criteria",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "base_commit": {
+          "name": "base_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "max_attempts": {
+          "name": "max_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "approved_at": {
+          "name": "approved_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "authority_invalidated_at": {
+          "name": "authority_invalidated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "development_tasks_claim_idx": {
+          "name": "development_tasks_claim_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "development_tasks_status_check": {
+          "name": "development_tasks_status_check",
+          "value": "\"development_tasks\".\"status\" in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'blocked', 'failed', 'cancelled')"
+        },
+        "development_tasks_base_commit_check": {
+          "name": "development_tasks_base_commit_check",
+          "value": "\"development_tasks\".\"base_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_tasks_max_attempts_check": {
+          "name": "development_tasks_max_attempts_check",
+          "value": "\"development_tasks\".\"max_attempts\" = 1"
+        },
+        "development_tasks_acceptance_criteria_array_check": {
+          "name": "development_tasks_acceptance_criteria_array_check",
+          "value": "jsonb_typeof(\"development_tasks\".\"acceptance_criteria\") = 'array' and jsonb_array_length(\"development_tasks\".\"acceptance_criteria\") > 0"
         }
       },
       "isRLSEnabled": false
@@ -672,6 +1648,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "model_profile": {
           "name": "model_profile",
           "type": "text",
@@ -749,6 +1731,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "model_invocations_role_check": {
+          "name": "model_invocations_role_check",
+          "value": "\"model_invocations\".\"role\" in ('intent_router', 'extractor', 'general', 'planner', 'verification')"
+        },
         "model_invocations_model_profile_check": {
           "name": "model_invocations_model_profile_check",
           "value": "\"model_invocations\".\"model_profile\" in ('fast', 'balanced', 'reasoning')"
@@ -844,6 +1830,14 @@
         "run_events_payload_object_check": {
           "name": "run_events_payload_object_check",
           "value": "jsonb_typeof(\"run_events\".\"payload\") = 'object'"
+        },
+        "run_events_from_status_check": {
+          "name": "run_events_from_status_check",
+          "value": "\"run_events\".\"from_status\" is null or \"run_events\".\"from_status\" in ('queued', 'running', 'verifying', 'retry_wait', 'needs_human', 'succeeded', 'failed', 'blocked', 'cancelled')"
+        },
+        "run_events_to_status_check": {
+          "name": "run_events_to_status_check",
+          "value": "\"run_events\".\"to_status\" is null or \"run_events\".\"to_status\" in ('queued', 'running', 'verifying', 'retry_wait', 'needs_human', 'succeeded', 'failed', 'blocked', 'cancelled')"
         }
       },
       "isRLSEnabled": false

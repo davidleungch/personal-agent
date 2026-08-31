@@ -1,9 +1,11 @@
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import {
+  developmentAcceptanceCriteriaSchema,
   emptyDevelopmentUsage,
   redactText,
   workspaceRelativePathSchema,
+  type DevelopmentAcceptanceCriteria,
   type DevelopmentBudget,
   type DevelopmentUsage,
   type JsonObject
@@ -12,6 +14,7 @@ import { z } from "zod";
 import {
   developmentToolNameSchema,
   implementerToolNames,
+  reviewerToolNames,
   type DevelopmentToolName,
   type DevelopmentToolResult,
   type DevelopmentToolSet
@@ -184,7 +187,17 @@ export class DockerSandboxManager implements SandboxManager {
   }
 
   async teardown(workspace: SandboxWorkspace): Promise<void> {
-    await this.docker(["rm", "--volumes", "--force", workspace.containerName], 60_000);
+    try {
+      await this.docker(["rm", "--volumes", "--force", workspace.containerName], 60_000);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.message.includes("No such container") || error.message.includes("No such object"))
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 }
 
@@ -209,6 +222,7 @@ const execInputSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
   workingDirectory: workspaceRelativePathSchema.optional()
 });
+const reviewCheckInputSchema = z.object({ acceptanceCriterionId: z.string().min(1).max(100) }).strict();
 
 function pathMatches(path: string, prefixes: readonly string[]): boolean {
   return prefixes.some(
@@ -216,14 +230,29 @@ function pathMatches(path: string, prefixes: readonly string[]): boolean {
   );
 }
 
+function pathIntersectsDescendant(path: string, prefixes: readonly string[]): boolean {
+  return prefixes.some(
+    (prefix) => path === "." || prefix === path || prefix.startsWith(`${path}/`)
+  );
+}
+
+function escapeSearchGlobPath(path: string): string {
+  return path.replace(/[!*?[\]{}]/g, "\\$&");
+}
+
 export class SandboxGateway implements DevelopmentToolSet {
-  readonly names = implementerToolNames;
+  readonly names: readonly DevelopmentToolName[];
   private readonly root: string;
+  private readonly role: "implementer" | "reviewer";
+  private readonly approvedChecks: DevelopmentAcceptanceCriteria;
 
   constructor(
     private readonly input: {
       allowedPaths: readonly string[];
+      approvedChecks?: unknown;
+      baseCommit?: string;
       budget: DevelopmentBudget;
+      candidateCommit?: string;
       forbiddenPaths: readonly string[];
       git: TrustedGit;
       knownSecrets?: readonly string[];
@@ -233,25 +262,43 @@ export class SandboxGateway implements DevelopmentToolSet {
         tool: DevelopmentToolName;
       }) => Promise<void>;
       onUsage: (delta: DevelopmentUsage) => Promise<void>;
+      role?: "implementer" | "reviewer";
       sandboxManager: SandboxManager;
       workspace: SandboxWorkspace;
     }
   ) {
     this.root = resolve(input.workspace.path);
+    this.role = input.role ?? "implementer";
+    this.names = this.role === "reviewer" ? reviewerToolNames : implementerToolNames;
+    this.approvedChecks = this.role === "reviewer"
+      ? developmentAcceptanceCriteriaSchema.parse(input.approvedChecks)
+      : [];
+    if (this.role === "reviewer" && (!input.baseCommit || !input.candidateCommit)) {
+      throw new Error("Reviewer gateway requires exact base and candidate commits");
+    }
   }
 
-  private lexicalPath(relativePath: string): string {
+  private reviewerPathVisible(relativePath: string, allowReadableAncestor = false): boolean {
+    if (pathMatches(relativePath, this.input.forbiddenPaths)) return false;
+    return pathMatches(relativePath, this.input.allowedPaths) ||
+      (allowReadableAncestor && pathIntersectsDescendant(relativePath, this.input.allowedPaths));
+  }
+
+  private lexicalPath(relativePath: string, allowReadableAncestor = false): string {
     const safePath = workspaceRelativePathSchema.parse(relativePath);
     if (safePath === ".git" || safePath.startsWith(".git/")) {
       throw new Error("Git metadata is not model-readable");
+    }
+    if (this.role === "reviewer" && !this.reviewerPathVisible(safePath, allowReadableAncestor)) {
+      throw new Error("Path is outside the approved Reviewer read scope");
     }
     const absolute = resolve(this.root, safePath);
     assertSandboxPath(this.root, absolute);
     return absolute;
   }
 
-  private async existingPath(relativePath: string): Promise<string> {
-    const absolute = this.lexicalPath(relativePath);
+  private async existingPath(relativePath: string, allowReadableAncestor = false): Promise<string> {
+    const absolute = this.lexicalPath(relativePath, allowReadableAncestor);
     const metadata = await lstat(absolute);
     if (metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory())) {
       throw new Error("Symlinks and device-like files are not accessible");
@@ -259,6 +306,22 @@ export class SandboxGateway implements DevelopmentToolSet {
     const canonical = await realpath(absolute);
     assertSandboxPath(this.root, canonical);
     return canonical;
+  }
+
+  private reviewerSearchExclusions(searchRoot: string): string[] {
+    if (this.role !== "reviewer") return [];
+    const exclusions: string[] = [];
+    for (const forbidden of this.input.forbiddenPaths) {
+      const relative = searchRoot.length === 0
+        ? forbidden
+        : forbidden.startsWith(`${searchRoot}/`)
+          ? forbidden.slice(searchRoot.length + 1)
+          : undefined;
+      if (!relative) continue;
+      const escaped = escapeSearchGlobPath(relative);
+      exclusions.push("--glob", `!${escaped}`, "--glob", `!${escaped}/**`);
+    }
+    return exclusions;
   }
 
   private assertWritable(relativePath: string): void {
@@ -311,9 +374,16 @@ export class SandboxGateway implements DevelopmentToolSet {
     signal?: AbortSignal
   ): Promise<DevelopmentToolResult> {
     const tool = developmentToolNameSchema.parse(name);
+    if (!this.names.includes(tool)) throw new Error(`Tool is not granted to the ${this.role}`);
     await this.input.onAudit({ safeMetadata: {}, status: "started", tool });
     try {
+      if (this.role === "reviewer") {
+        await this.input.git.assertWorkspaceClean(this.input.workspace.path, this.input.candidateCommit!);
+      }
       const result = await this.executeTool(tool, rawInput, signal);
+      if (this.role === "reviewer") {
+        await this.input.git.assertWorkspaceClean(this.input.workspace.path, this.input.candidateCommit!);
+      }
       await this.input.onUsage({ ...emptyDevelopmentUsage(), toolCalls: 1 });
       await this.input.onAudit({ safeMetadata: result.safeMetadata, status: "success", tool });
       return result;
@@ -337,22 +407,37 @@ export class SandboxGateway implements DevelopmentToolSet {
       const path = await this.existingPath(input.path);
       const content = await readFile(path, "utf8");
       if (Buffer.byteLength(content) > 1_000_000) throw new Error("File exceeds read limit");
-      return { content, safeMetadata: { bytes: Buffer.byteLength(content), path: input.path } };
+      return {
+        content: redactText(content, this.input.knownSecrets),
+        safeMetadata: { bytes: Buffer.byteLength(content), path: input.path }
+      };
     }
     if (tool === "sandbox.list") {
       const input = listInputSchema.parse(rawInput);
       const relativePath = input.path ?? "";
-      const path = relativePath ? await this.existingPath(relativePath) : this.root;
+      const path = relativePath ? await this.existingPath(relativePath, true) : this.root;
       const entries = await readdir(path, { withFileTypes: true });
       if (entries.length > 1_000) throw new Error("Directory exceeds listing limit");
-      const content = entries
-        .filter((entry) => entry.name !== ".git")
+      const visibleEntries = entries.filter((entry) => {
+        if (entry.name === ".git") return false;
+        if (this.role !== "reviewer") return true;
+        const entryPath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+        return this.reviewerPathVisible(entryPath, true);
+      });
+      const content = visibleEntries
         .map((entry) => `${entry.isDirectory() ? "directory" : "file"}\t${entry.name}`)
         .join("\n");
-      return { content, safeMetadata: { entries: entries.length, path: relativePath || "." } };
+      return {
+        content,
+        safeMetadata: { entries: visibleEntries.length, path: relativePath || "." }
+      };
     }
     if (tool === "sandbox.search") {
       const input = searchInputSchema.parse(rawInput);
+      if (this.role === "reviewer" && !input.path && !this.reviewerPathVisible(".")) {
+        throw new Error("Reviewer search requires an approved bounded path");
+      }
+      const relativePath = input.path ?? "";
       const searchPath = input.path ? await this.existingPath(input.path) : this.root;
       const result = await runProcess({
         arguments: [
@@ -364,6 +449,7 @@ export class SandboxGateway implements DevelopmentToolSet {
           "!node_modules/**",
           "--glob",
           "!.git/**",
+          ...this.reviewerSearchExclusions(relativePath),
           input.query,
           searchPath
         ],
@@ -380,6 +466,43 @@ export class SandboxGateway implements DevelopmentToolSet {
         content: redactText(result.stdout, this.input.knownSecrets),
         safeMetadata: { duration_ms: result.durationMs, matches: result.stdout.split("\n").filter(Boolean).length }
       };
+    }
+    if (tool === "review.run_check") {
+      const input = reviewCheckInputSchema.parse(rawInput);
+      const criterion = this.approvedChecks.find(
+        (candidate) => candidate.id === input.acceptanceCriterionId
+      );
+      if (!criterion) throw new Error("Reviewer requested an unapproved deterministic check");
+      const result = await this.input.sandboxManager.execute(this.input.workspace, {
+        arguments: criterion.check.arguments,
+        executable: criterion.check.executable,
+        maxOutputBytes: this.input.budget.maxCommandOutputBytes,
+        timeoutMs: Math.min(criterion.check.timeoutMs, this.input.budget.maxCommandMs),
+        ...(signal ? { signal } : {}),
+        ...(criterion.check.workingDirectory
+          ? { workingDirectory: criterion.check.workingDirectory }
+          : {})
+      });
+      const output = `${result.stdout}${result.stderr}`;
+      await this.input.onUsage({
+        ...emptyDevelopmentUsage(),
+        commandMs: result.durationMs,
+        commandOutputBytes: Buffer.byteLength(output)
+      });
+      if (result.exitCode !== 0 || result.timedOut || result.outputLimitExceeded) {
+        throw new Error("Approved Reviewer check failed");
+      }
+      return {
+        content: redactText(output, this.input.knownSecrets),
+        safeMetadata: {
+          criterion_id: criterion.id,
+          duration_ms: result.durationMs,
+          exit_code: result.exitCode
+        }
+      };
+    }
+    if (tool === "review.submit") {
+      throw new Error("Reviewer result submission is owned by the Pi adapter");
     }
     if (tool === "sandbox.write") {
       const input = writeInputSchema.parse(rawInput);
@@ -434,10 +557,16 @@ export class SandboxGateway implements DevelopmentToolSet {
       const content = await this.input.git.status(this.input.workspace.path);
       return { content, safeMetadata: { changed_entries: content.split("\n").filter(Boolean).length } };
     }
-    const content = await this.input.git.diff(
-      this.input.workspace.path,
-      this.input.budget.maxDiffBytes
-    );
+    const content = this.role === "reviewer"
+      ? await this.input.git.diffCommits(
+          this.input.baseCommit!,
+          this.input.candidateCommit!,
+          this.input.budget.maxDiffBytes
+        )
+      : await this.input.git.diff(
+          this.input.workspace.path,
+          this.input.budget.maxDiffBytes
+        );
     return { content, safeMetadata: { bytes: Buffer.byteLength(content) } };
   }
 }

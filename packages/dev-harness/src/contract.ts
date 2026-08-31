@@ -7,6 +7,7 @@ import {
   modelProfileSchema,
   type DevelopmentBudget,
   type DevelopmentContextManifest,
+  type DevelopmentReviewResult,
   type DevelopmentRole,
   type DevelopmentUsage,
   type JsonObject,
@@ -22,11 +23,32 @@ export const developmentToolNameSchema = z.enum([
   "sandbox.edit",
   "sandbox.exec",
   "git.status",
-  "git.diff"
+  "git.diff",
+  "review.run_check",
+  "review.submit"
 ]);
 export type DevelopmentToolName = z.infer<typeof developmentToolNameSchema>;
 
-export const implementerToolNames = developmentToolNameSchema.options;
+export const implementerToolNames = [
+  "sandbox.read",
+  "sandbox.list",
+  "sandbox.search",
+  "sandbox.write",
+  "sandbox.edit",
+  "sandbox.exec",
+  "git.status",
+  "git.diff"
+] as const satisfies readonly DevelopmentToolName[];
+
+export const reviewerToolNames = [
+  "sandbox.read",
+  "sandbox.list",
+  "sandbox.search",
+  "git.status",
+  "git.diff",
+  "review.run_check",
+  "review.submit"
+] as const satisfies readonly DevelopmentToolName[];
 
 export type DevelopmentContextSection = {
   content: string;
@@ -38,6 +60,9 @@ export type DevelopmentContext = {
   acceptanceCriteria: string;
   allowedPaths: readonly string[];
   baseCommit: string;
+  candidateCommit?: string;
+  candidateDiff?: string;
+  deterministicEvidence?: string;
   budget: DevelopmentBudget;
   digest: string;
   forbiddenPaths: readonly string[];
@@ -82,6 +107,12 @@ export type DevelopmentEvent =
   | {
       kind: "completed";
       result: "completion_proposed";
+      safeMetadata: JsonObject;
+    }
+  | {
+      kind: "completed";
+      result: "review_proposed";
+      review: DevelopmentReviewResult;
       safeMetadata: JsonObject;
     }
   | {

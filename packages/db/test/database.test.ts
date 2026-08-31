@@ -9,6 +9,9 @@ import {
   automationRuns,
   developmentAttemptEvents,
   developmentAttempts,
+  developmentReviewEvents,
+  developmentReviews,
+  developmentTasks,
   idempotencyRecords,
   modelInvocations,
   runEvents,
@@ -70,6 +73,8 @@ describe("clean PostgreSQL migrations", () => {
       "command_requests",
       "development_attempt_events",
       "development_attempts",
+      "development_review_events",
+      "development_reviews",
       "development_tasks",
       "evidence",
       "idempotency_records",
@@ -81,7 +86,7 @@ describe("clean PostgreSQL migrations", () => {
     const idColumns = await pool.query<{ column_default: string | null }>(
       "select column_default from information_schema.columns where table_schema = 'public' and column_name = 'id'"
     );
-    expect(idColumns.rows).toHaveLength(11);
+    expect(idColumns.rows).toHaveLength(13);
     expect(idColumns.rows.every((row) => row.column_default === null)).toBe(true);
 
     const timestampTypes = await pool.query<{ data_type: string }>(
@@ -96,6 +101,9 @@ describe("clean PostgreSQL migrations", () => {
     }
     expect(getTableConfig(developmentAttempts).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
     expect(getTableConfig(developmentAttemptEvents).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
+    expect(getTableConfig(developmentReviews).foreignKeys).toHaveLength(2);
+    expect(getTableConfig(developmentReviews).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[developmentTasks.id], [developmentAttempts.id]]);
+    expect(getTableConfig(developmentReviewEvents).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
   });
 });
 

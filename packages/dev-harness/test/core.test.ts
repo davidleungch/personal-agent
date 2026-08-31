@@ -10,6 +10,7 @@ import {
   zeroUsage
 } from "../src/contract";
 import { DevelopmentContextCompiler } from "../src/context-compiler";
+import { ReviewerContextCompiler } from "../src/reviewer-context-compiler";
 import { TrustedGit } from "../src/git";
 import { requireProcess, runProcess } from "../src/process";
 
@@ -28,9 +29,15 @@ async function fixtureRepository(): Promise<{ commit: string; path: string; work
   await mkdir(join(path, "src"), { recursive: true });
   await Promise.all([
     writeFile(join(path, "AGENTS.md"), "agents"),
-    writeFile(join(path, "docs/design.md"), "design"),
+    writeFile(
+      join(path, "docs/design.md"),
+      "# Design\n\n```md\n# Not Governing In A Fence\n~~~md\n## Still Not Governing\n```\n\n~~~md\n## Also Not Governing\n~~~\n\n## Design-1\n\n## Design\n"
+    ),
     writeFile(join(path, "docs/decisions/0001-pi-development-harness.md"), "adr"),
-    writeFile(join(path, "docs/phase-2-implementation-plan.md"), "plan"),
+    writeFile(
+      join(path, "docs/phase-2-implementation-plan.md"),
+      "# Phase 2\n\n## Phase 2B\n\n### Contract\nReview only.\n\n## Phase 2C\n\n### Contract\nFix loop.\n\n## Phase 2D\n\n### Contract\nMerge.\n"
+    ),
     writeFile(join(path, "src/relevant.ts"), "export const relevant = true;\n")
   ]);
   execFileSync("git", ["init", "-q"], { cwd: path });
@@ -173,6 +180,129 @@ describe("development contract and process boundary", () => {
   });
 });
 
+describe("Reviewer Context Compiler", () => {
+  it("binds exact candidate diff, source, evidence, and rejects changed or over-budget inputs", async () => {
+    const fixture = await fixtureRepository();
+    await writeFile(join(fixture.path, "src/relevant.ts"), "export const relevant = 'candidate';\n");
+    execFileSync("git", ["add", "src/relevant.ts"], { cwd: fixture.path });
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-q", "-m", "candidate"], { cwd: fixture.path });
+    const candidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.path, encoding: "utf8" }).trim();
+    const compiler = new ReviewerContextCompiler(new TrustedGit(fixture.path, fixture.workspaces));
+    const evidence = [{ criterionId: "tests", durationMs: 5, eventId: "00000000-0000-4000-8000-000000000001", status: "success" }];
+    const input = {
+      acceptanceCriteria,
+      baseCommit: fixture.commit,
+      budget,
+      candidateCommit: candidate,
+      contextPolicy: {
+        forbiddenPaths: ["src/generated"],
+        readablePaths: ["src"],
+        relevantPaths: ["src/relevant.ts", "src/relevant.ts"]
+      },
+      modelProfile: "reasoning",
+      specification: "Review relevant.ts",
+      taskTitle: "Review relevant change",
+      testEvidence: evidence,
+      usage
+    } as const;
+    const context = await compiler.compile(input);
+    expect(context).toMatchObject({ candidateCommit: candidate, role: "reviewer" });
+    expect(context.candidateDiff).toContain("candidate");
+    expect(context.manifest.entries.filter((entry) => entry.path === "src/relevant.ts")).toHaveLength(1);
+    const reviewerManifest = context.manifest as typeof context.manifest & {
+      authorityReferences: string[];
+    };
+    expect(reviewerManifest.authorityReferences).toEqual(expect.arrayContaining([
+      "docs/design.md#design",
+      "docs/design.md#design-1",
+      "docs/design.md#design-2"
+    ]));
+    expect(reviewerManifest.authorityReferences).toEqual(expect.arrayContaining([
+      "docs/phase-2-implementation-plan.md#contract",
+      "docs/phase-2-implementation-plan.md#contract-1",
+      "docs/phase-2-implementation-plan.md#contract-2"
+    ]));
+    expect(new Set(reviewerManifest.authorityReferences).size).toBe(
+      reviewerManifest.authorityReferences.length
+    );
+    expect(reviewerManifest.authorityReferences).not.toContain(
+      "docs/design.md#not-governing-in-a-fence"
+    );
+    expect(reviewerManifest.authorityReferences).not.toContain(
+      "docs/design.md#still-not-governing"
+    );
+    expect(reviewerManifest.authorityReferences).not.toContain(
+      "docs/design.md#also-not-governing"
+    );
+    const validFinding = {
+      acceptanceCriterionId: "tests",
+      architectureReference: "docs/design.md#design",
+      category: "correctness" as const,
+      finding: "Candidate issue",
+      relevantPath: "src/relevant.ts",
+      requiredCorrection: "Correct it",
+      severity: "high" as const
+    };
+    await expect(compiler.validateFindings(context, [validFinding])).resolves.toBeUndefined();
+    for (const architectureReference of [
+      "docs/phase-2-implementation-plan.md#contract",
+      "docs/phase-2-implementation-plan.md#contract-1",
+      "docs/phase-2-implementation-plan.md#contract-2"
+    ]) {
+      await expect(compiler.validateFindings(context, [
+        { ...validFinding, architectureReference }
+      ])).resolves.toBeUndefined();
+    }
+    await expect(compiler.validateFindings(context, [
+      { ...validFinding, relevantPath: undefined }
+    ])).resolves.toBeUndefined();
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, acceptanceCriterionId: "unknown"
+    }])).rejects.toThrow("unknown acceptance");
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, architectureReference: "n/a"
+    }])).rejects.toThrow("heading");
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, architectureReference: "docs/design.md #design"
+    }])).rejects.toThrow("normalized");
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, architectureReference: "docs/design.md#missing"
+    }])).rejects.toThrow("nonexistent architecture");
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, relevantPath: "AGENTS.md"
+    }])).rejects.toThrow("read scope");
+    await expect(compiler.validateFindings(context, [{
+      ...validFinding, relevantPath: "src/missing.ts"
+    }])).rejects.toThrow("not bound");
+    await expect(compiler.validateFindings({
+      ...context,
+      manifest: {
+        ...context.manifest,
+        entries: context.manifest.entries.map((entry) =>
+          entry.path === "src/relevant.ts" ? { ...entry, blobId: "f".repeat(40) } : entry
+        )
+      }
+    }, [validFinding])).rejects.toThrow("changed from the exact candidate");
+
+    await expect(compiler.compile({
+      ...input,
+      contextPolicy: { ...input.contextPolicy, relevantPaths: ["AGENTS.md"] }
+    })).rejects.toThrow("read scope");
+    await expect(compiler.compile({
+      ...input,
+      contextPolicy: { forbiddenPaths: ["src"], readablePaths: ["."], relevantPaths: ["src/relevant.ts"] }
+    })).rejects.toThrow("read scope");
+    await expect(compiler.compile({ ...input, testEvidence: [] })).rejects.toThrow("missing deterministic");
+    await expect(compiler.compile({ ...input, budget: { ...budget, maxContextBytes: 5 } })).rejects.toThrow("byte budget");
+    await expect(compiler.compile({ ...input, usage: { ...usage, modelInvocations: budget.maxModelInvocations } })).rejects.toThrow("no remaining");
+
+    execFileSync("git", ["checkout", "--detach", fixture.commit], { cwd: fixture.path, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "--allow-empty", "-q", "-m", "empty"], { cwd: fixture.path });
+    const emptyCandidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.path, encoding: "utf8" }).trim();
+    await expect(compiler.compile({ ...input, candidateCommit: emptyCandidate })).rejects.toThrow("diff is empty");
+  });
+});
+
 describe("Development Context Compiler", () => {
   it("reconstructs bounded context and a blob manifest from the exact base", async () => {
     const fixture = await fixtureRepository();
@@ -212,7 +342,11 @@ describe("Development Context Compiler", () => {
         usage
       })
     ).rejects.toThrow("byte budget");
-    const authorityBytes = "agents".length + "design".length + "adr".length + "plan".length;
+    const authorityBytes =
+      "agents".length +
+      "# Design\n\n```md\n# Not Governing In A Fence\n~~~md\n## Still Not Governing\n```\n\n~~~md\n## Also Not Governing\n~~~\n\n## Design-1\n\n## Design\n".length +
+      "adr".length +
+      "# Phase 2\n\n## Phase 2B\n\n### Contract\nReview only.\n\n## Phase 2C\n\n### Contract\nFix loop.\n\n## Phase 2D\n\n### Contract\nMerge.\n".length;
     await expect(
       compiler.compile({
         acceptanceCriteria,

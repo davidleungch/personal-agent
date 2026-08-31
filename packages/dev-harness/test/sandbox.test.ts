@@ -37,8 +37,20 @@ async function gitWorkspace() {
   const repository = await mkdtemp(join(tmpdir(), "personal-agent-sandbox-repo-"));
   const workspaces = `${repository}-workspaces`;
   cleanup.push(repository, workspaces);
-  await mkdir(join(repository, "src"));
+  await mkdir(join(repository, "src/private/nested"), { recursive: true });
+  await mkdir(join(repository, "src/[private]"), { recursive: true });
+  await mkdir(join(repository, ".pi"));
   await writeFile(join(repository, "src/value.txt"), "value\n");
+  await writeFile(join(repository, "src/private/secret.txt"), "FORBIDDEN_PRIVATE_CANARY\n");
+  await writeFile(
+    join(repository, "src/private/nested/secret.txt"),
+    "FORBIDDEN_NESTED_CANARY\n"
+  );
+  await writeFile(
+    join(repository, "src/[private]/secret.txt"),
+    "FORBIDDEN_GLOB_CANARY\n"
+  );
+  await writeFile(join(repository, ".pi/hidden.txt"), "FORBIDDEN_PI_CANARY\n");
   const manifests = [
     "package.json",
     "pnpm-lock.yaml",
@@ -155,7 +167,7 @@ describe("project-owned sandbox gateway", () => {
       content: expect.stringContaining("directory\tsrc")
     });
     await expect(fixture.gateway.invoke("sandbox.list", { path: "src" })).resolves.toMatchObject({
-      content: "file\tvalue.txt"
+      content: expect.stringContaining("file\tvalue.txt")
     });
     await expect(
       fixture.gateway.invoke("sandbox.search", { query: "value" })
@@ -306,6 +318,96 @@ describe("project-owned sandbox gateway", () => {
     expect(nonErrorAudits.at(-1)).toEqual({ failure_class: "unknown" });
   });
 
+  it("enforces the Reviewer read-only grant, bounded reads, exact diff, and approved checks", async () => {
+    const fixture = await gitWorkspace();
+    await writeFile(join(fixture.path, "src/value.txt"), "candidate\n");
+    const candidate = await fixture.git.captureCandidate({
+      allowedPaths: ["src"], attemptId: fixture.id, baseCommit: fixture.base,
+      forbiddenPaths: [], maxDiffBytes: budget.maxDiffBytes, workspacePath: fixture.path
+    });
+    await fixture.git.removeWorktree(fixture.path);
+    const reviewId = "00000000-0000-4000-8000-000000000098";
+    const reviewPath = await fixture.git.createWorktree(reviewId, candidate.commit);
+    const manager = new FakeSandboxManager();
+    const workspace = manager.identify({ sandboxId: reviewId, workspacePath: reviewPath });
+    const audits: unknown[] = [];
+    const gatewayInput = {
+      allowedPaths: ["src"],
+      approvedChecks: [{
+        check: { arguments: ["-e", "process.exit(0)"], executable: "node" as const, timeoutMs: 500, workingDirectory: "src" },
+        description: "fixture", id: "fixture"
+      }],
+      baseCommit: fixture.base,
+      budget,
+      candidateCommit: candidate.commit,
+      forbiddenPaths: ["src/private", "src/[private]", "outside/private"],
+      git: fixture.git,
+      knownSecrets: ["SANDBOX_SECRET_CANARY"],
+      onAudit: async (event: unknown) => { audits.push(event); },
+      onUsage: async () => undefined,
+      role: "reviewer" as const,
+      sandboxManager: manager,
+      workspace
+    };
+    const reviewer = new SandboxGateway(gatewayInput);
+    expect(reviewer.names).toEqual([
+      "sandbox.read", "sandbox.list", "sandbox.search", "git.status", "git.diff",
+      "review.run_check", "review.submit"
+    ]);
+    await expect(reviewer.invoke("sandbox.list", {})).resolves.toMatchObject({
+      content: "directory\tsrc",
+      safeMetadata: { entries: 1, path: "." }
+    });
+    await expect(reviewer.invoke("sandbox.list", { path: "src" })).resolves.toMatchObject({
+      content: "file\tvalue.txt",
+      safeMetadata: { entries: 1, path: "src" }
+    });
+    await expect(reviewer.invoke("sandbox.read", { path: "src/value.txt" })).resolves.toMatchObject({
+      content: "candidate\n"
+    });
+    await expect(reviewer.invoke("sandbox.read", { path: "package.json" })).rejects.toThrow("read scope");
+    await expect(reviewer.invoke("sandbox.search", { query: "candidate" })).rejects.toThrow("bounded path");
+    await expect(reviewer.invoke("sandbox.search", { path: "src", query: "candidate" })).resolves.toMatchObject({ content: expect.stringContaining("candidate") });
+    await expect(
+      reviewer.invoke("sandbox.search", { path: "src", query: "FORBIDDEN_PRIVATE_CANARY" })
+    ).resolves.toMatchObject({ content: "", safeMetadata: { matches: 0 } });
+    await expect(
+      reviewer.invoke("sandbox.search", { path: "src", query: "FORBIDDEN_NESTED_CANARY" })
+    ).resolves.toMatchObject({ content: "", safeMetadata: { matches: 0 } });
+    await expect(
+      reviewer.invoke("sandbox.search", { path: "src", query: "FORBIDDEN_GLOB_CANARY" })
+    ).resolves.toMatchObject({ content: "", safeMetadata: { matches: 0 } });
+    await expect(reviewer.invoke("git.status", {})).resolves.toMatchObject({ content: "" });
+    await expect(reviewer.invoke("git.diff", {})).resolves.toMatchObject({ content: expect.stringContaining("candidate") });
+    await expect(reviewer.invoke("review.run_check", { acceptanceCriterionId: "fixture" }, new AbortController().signal)).resolves.toMatchObject({ content: "command output" });
+    await expect(reviewer.invoke("review.submit", { decision: "APPROVE", findings: [] })).rejects.toThrow("Pi adapter");
+    await expect(reviewer.invoke("sandbox.write", { path: "src/value.txt", content: "bad" })).rejects.toThrow("not granted");
+
+    for (const result of [
+      { exitCode: 1, timedOut: false, outputLimitExceeded: false },
+      { exitCode: 0, timedOut: true, outputLimitExceeded: false },
+      { exitCode: 0, timedOut: false, outputLimitExceeded: true }
+    ]) {
+      manager.results.push({ durationMs: 1, stderr: "bad", stdout: "", ...result });
+      await expect(reviewer.invoke("review.run_check", { acceptanceCriterionId: "fixture" })).rejects.toThrow("check failed");
+    }
+    expect(audits.length).toBeGreaterThan(0);
+
+    expect(() => new SandboxGateway({ ...gatewayInput, baseCommit: undefined })).toThrow("exact base");
+    const wholeRepo = new SandboxGateway({
+      ...gatewayInput,
+      allowedPaths: ["."],
+      forbiddenPaths: [".pi", "src/private", "src/[private]"]
+    });
+    const wholeRepositoryRoot = await wholeRepo.invoke("sandbox.list", {});
+    expect(wholeRepositoryRoot.content).not.toContain(".pi");
+    expect(wholeRepositoryRoot.safeMetadata).toEqual({ entries: 8, path: "." });
+    await expect(wholeRepo.invoke("sandbox.search", { query: "candidate" })).resolves.toMatchObject({ content: expect.stringContaining("candidate") });
+    await expect(
+      wholeRepo.invoke("sandbox.search", { query: "FORBIDDEN_PI_CANARY" })
+    ).resolves.toMatchObject({ content: "", safeMetadata: { matches: 0 } });
+  });
+
   it("routes Git status and diff through trusted Git without commit authority", async () => {
     const fixture = await gatewayFixture();
     await writeFile(join(fixture.path, "src/value.txt"), "diff\n");
@@ -368,6 +470,18 @@ describe("Docker sandbox security boundary", () => {
     delete process.env.GOOGLE_CANARY_FOR_SANDBOX_TEST;
     delete process.env.PRODUCTION_DATABASE_CANARY_FOR_SANDBOX_TEST;
   }, 60_000);
+
+  it("treats both Docker missing-container messages as idempotent and rethrows other cleanup failures", async () => {
+    const workspace = { containerName: "missing", id: "id", path: "/tmp" };
+    for (const message of ["No such container", "No such object"]) {
+      const manager = new DockerSandboxManager("unused") as unknown as { docker: () => Promise<string>; teardown: (workspace: SandboxWorkspace) => Promise<void> };
+      manager.docker = async () => Promise.reject(new Error(message));
+      await expect(manager.teardown(workspace)).resolves.toBeUndefined();
+    }
+    const manager = new DockerSandboxManager("unused") as unknown as { docker: () => Promise<string>; teardown: (workspace: SandboxWorkspace) => Promise<void> };
+    manager.docker = async () => Promise.reject("non-error");
+    await expect(manager.teardown(workspace)).rejects.toBe("non-error");
+  });
 
   it("fails closed when dependency preparation or container cleanup fails", async () => {
     const fixture = await gitWorkspace();

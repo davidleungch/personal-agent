@@ -12,18 +12,20 @@ Current status:
 | Phase or milestone | Status |
 | --- | --- |
 | Phase 1 — ACT | **COMPLETE** |
-| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2A COMPLETE** |
+| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2B AWAITING INDEPENDENT RE-REVIEW** |
 | Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
-| Phase 2B — Independent Reviewer | **NEXT / NOT STARTED / NOT AUTHORIZED** |
-| Phase 2C — Autonomous Fix Loop | **NOT STARTED** |
+| Phase 2B — Independent Reviewer | **IMPLEMENTED / AWAITING INDEPENDENT RE-REVIEW** |
+| Phase 2C — Autonomous Fix Loop | **NOT STARTED / NOT AUTHORIZED** |
 | Phase 2D — Auto-Merge + Deploy | **NOT STARTED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
 
 Phase 2A was separately authorized by the user and completed on 2026-08-28.
-That completion does not authorize Phase 2B. Each later milestone requires
-separate authorization after review of the preceding milestone. No milestone
-passing implicitly starts the next one.
+Phase 2B implementation was separately authorized and is awaiting a fresh
+independent re-review after targeted correctness fixes. It is not declared
+complete by the implementation session and does not authorize Phase 2C. Each
+later milestone requires separate authorization after review of the preceding
+milestone. No milestone passing implicitly starts the next one.
 
 [`implementation-plan.md`](implementation-plan.md) and
 [`phase-1-acceptance.md`](phase-1-acceptance.md) remain the historical Phase 1
@@ -84,7 +86,9 @@ disposable execution context. They never become a source of authority.
 ## Milestone progression rules
 
 1. Implement only the explicitly authorized milestone.
-2. Apply checked-in migrations from zero and preserve all existing migrations.
+2. Apply the checked-in greenfield baseline from zero. Before launch, superseded
+   development-only migration history may be replaced when the user explicitly
+   authorizes it; the baseline must preserve the final schema and invariants.
 3. Keep the normal app/worker/PostgreSQL runtime healthy without development or
    external credentials.
 4. Stop at the milestone boundary with exact test and acceptance evidence.
@@ -689,9 +693,112 @@ the Reviewer attempt, decision, and findings to the exact candidate commit. A
 changed candidate invalidates the review. Reviewer `APPROVE` is evidence, not
 merge authority, and Phase 2B includes no autonomous fix/retry loop.
 
+The trusted DevelopmentHarness/control plane establishes that the external
+Reviewer execution occurred. PostgreSQL preserves its validated lifecycle,
+context, proposal, cleanup, and exact-candidate bindings; it does not attest an
+external model invocation against an actor able to forge a complete semantically
+valid history across every trusted persistence table. Such unrestricted trusted
+write authority is outside the Phase 2B threat model. Malformed state submitted
+through normal trusted repository APIs and inconsistent direct durable
+transitions remain in scope and must fail closed.
+
 Acceptance proves reviewer independence, read-only enforcement, structured and
 durable findings, exact candidate binding, session-loss reconstruction, and all
 repository quality gates. Stop for separate Phase 2C authorization.
+
+## Phase 2B implementation evidence — awaiting independent re-review
+
+Phase 2B implementation stops after one authoritative independent review of one
+exact `candidate_ready` revision. This implementation session does not declare
+milestone completion. The implementation adds no fix loop, CI acceptance,
+merge, push, deployment, task generation, or later-phase authority.
+
+Durable and trust-boundary evidence includes:
+
+- `development_reviews` records one fenced Reviewer attempt per task, the exact
+  implementation attempt/candidate commit/ref, immutable context manifest,
+  complete bounded read/source policy and digest, bounded semantic model policy
+  and usage, strict decision/findings, safe summary, cleanup state, and
+  finalization state;
+- captured implementation candidate provenance is PostgreSQL-immutable, and
+  authoritative lookup joins the current task, implementation attempt, and
+  finalized review so blocked or inconsistent authority fails closed;
+- append-only `development_review_events` records safe transition, harness,
+  tool, check, integrity, cleanup, and finalization audit evidence;
+- PostgreSQL constraints and triggers bind every review to the exact succeeded
+  Phase 2A implementation candidate, protect immutable policy/context/proposal
+  fields, enforce the Reviewer lifecycle and runtime-equivalent budget/usage/
+  policy/manifest/finding structure in both pending and terminal rows, reject
+  fabricated terminal approval, require mandatory finding traceability, and
+  prevent review-history deletion or event mutation;
+- the Reviewer uses a fresh in-memory Pi session and receives only durable task
+  specification, criteria, base/candidate revisions, exact diff, bounded source,
+  governing authority blobs, deterministic Phase 2A test evidence, and its own
+  role budget—never Implementer session, transcript, compaction, hidden
+  reasoning, self-assessment, or safe summary;
+- Reviewer tools are explicitly limited to bounded read/list/search, trusted
+  status/exact diff, approved criterion-ID checks, and one strict terminating
+  result submission; no write/edit/arbitrary command/Git mutation/merge/deploy
+  capability is granted;
+- `APPROVE` requires zero findings and `REQUEST_CHANGES` requires at least one
+  fully structured finding with severity, category, finding, required
+  correction, optional relevant path, acceptance criterion ID, and architecture
+  reference. Criterion IDs resolve to the approved task, architecture anchors
+  resolve to a supplied governing Markdown heading, and relevant paths resolve
+  to exact candidate blobs inside the durable Reviewer scope;
+- authoritative success is persisted only after exact candidate/context
+  re-verification, proposal audit, idempotent sandbox/worktree cleanup, cleanup
+  audit, and one transactional finalization; non-final rows are never returned
+  by the authoritative-review lookup;
+- PostgreSQL time exclusively creates, renews, expires, and replaces Reviewer
+  leases. Every authoritative operation locks first and then evaluates
+  `clock_timestamp()`; a transaction that waited past expiry cannot renew or
+  finalize, expired leases increment fencing generation, and stale writes fail.
+  Recovery uses PostgreSQL/Git/documents only and never resumes or invokes Pi.
+  Every nonterminal review remains reclaimable after cleanup is pending, failed,
+  or already succeeded, and successful cleanup is not repeated;
+- architecture headings receive deterministic unique anchors within each exact
+  governing blob (`contract`, `contract-1`, `contract-2`, and so on), including
+  fenced-code exclusion, and the immutable manifest is the durable catalog used
+  by PostgreSQL finding validation;
+- every review records a deterministic review-specific Git retention ref that
+  keeps the PostgreSQL-authoritative candidate commit reachable without making
+  the mutable ref an identity input; corrupt or unavailable retention fails
+  reconstruction closed; and
+- deterministic tests cover both decisions, malformed/missing/unsafe evidence,
+  mandatory traceability, candidate/ref/context changes, read-only and command
+  policy, tracked mutation, provider/budget/timeout failure, competing claims,
+  stale fencing, duplicate persistence, persistence/audit/finalization failure,
+  cleanup retry, crash after durable cleanup, candidate-ref deletion and Git GC,
+  retention corruption/loss, durable policy reconstruction, session loss,
+  exact-candidate non-transferability, forced PostgreSQL finalizer/recoverer and
+  competing-recoverer lock contention, exactly-once terminal finalization, and
+  the absence of automatic fix/merge/deploy behavior. Existing Phase 2A and ACT
+  suites remain passing.
+
+Final quality evidence:
+
+- `pnpm install --frozen-lockfile`: pass;
+- `pnpm lint`: pass with zero warnings;
+- `pnpm typecheck`: pass;
+- `pnpm test`: 218 passed, 3 skipped opt-in tests;
+- `pnpm test:coverage`: exactly 100% statements (2830/2830), branches
+  (1834/1834), functions (664/664), and lines (2551/2551);
+- `pnpm build`: pass;
+- the single greenfield `0000_baseline` migration, clean-database application
+  to 13 tables, PostgreSQL integration/concurrency/fencing, and
+  `drizzle-kit check`: pass;
+- sandbox/security tests, Docker Compose config/build/runtime, migration exit 0,
+  credential-free app/worker health, and full runtime restart recovery: pass;
+- the development-sandbox target builds and inspects as both `linux/amd64` and
+  `linux/arm64`;
+- `git diff --check` and secret/generated-artifact/coverage-exclusion/
+  trust-scope/Phase 2C-3 authorization audits: pass.
+
+Validation used Node 22.19.0 and no OpenAI/Pi provider account, Google account,
+public website, personal data, merge credential, or deployment credential.
+Independent re-review remains required. Phase 2C remains **NOT STARTED / NOT
+AUTHORIZED**.
 
 # Phase 2C — Autonomous Fix Loop
 

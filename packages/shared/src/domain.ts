@@ -82,7 +82,7 @@ export const toolStatusSchema = z.enum(["success", "failed", "unknown"]);
 export const idempotencyStateSchema = z.enum(["reserved", "confirmed", "unknown"]);
 export const sideEffectClassSchema = z.enum(["read_only", "reversible", "consequential"]);
 
-export const developmentRoleSchema = z.literal("implementer");
+export const developmentRoleSchema = z.enum(["implementer", "reviewer"]);
 export type DevelopmentRole = z.infer<typeof developmentRoleSchema>;
 
 export const developmentTaskStatusSchema = z.enum([
@@ -129,6 +129,32 @@ export const developmentAttemptEventKindSchema = z.enum([
 ]);
 export type DevelopmentAttemptEventKind = z.infer<typeof developmentAttemptEventKindSchema>;
 
+export const developmentReviewStatusSchema = z.enum([
+  "preparing",
+  "reviewing",
+  "finalizing",
+  "interrupted",
+  "succeeded",
+  "failed"
+]);
+export type DevelopmentReviewStatus = z.infer<typeof developmentReviewStatusSchema>;
+
+export const developmentReviewCleanupStatusSchema = z.enum(["pending", "failed", "succeeded"]);
+export type DevelopmentReviewCleanupStatus = z.infer<
+  typeof developmentReviewCleanupStatusSchema
+>;
+
+export const developmentReviewEventKindSchema = z.enum([
+  "transition",
+  "harness",
+  "tool",
+  "check",
+  "integrity",
+  "cleanup",
+  "finalization"
+]);
+export type DevelopmentReviewEventKind = z.infer<typeof developmentReviewEventKindSchema>;
+
 export const gitObjectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
 export const sha256DigestSchema = z.string().regex(/^[0-9a-f]{64}$/);
 export const workspaceRelativePathSchema = z
@@ -144,6 +170,22 @@ export const workspaceRelativePathSchema = z
     "Path must be normalized and workspace-relative"
   );
 
+export const developmentScopedPathSchema = z.union([
+  z.literal("."),
+  workspaceRelativePathSchema
+]);
+
+export const developmentReviewerContextPolicySchema = z
+  .object({
+    forbiddenPaths: z.array(developmentScopedPathSchema).max(64),
+    readablePaths: z.array(developmentScopedPathSchema).min(1).max(64),
+    relevantPaths: z.array(workspaceRelativePathSchema).max(64)
+  })
+  .strict();
+export type DevelopmentReviewerContextPolicy = z.infer<
+  typeof developmentReviewerContextPolicySchema
+>;
+
 export const developmentCheckSchema = z.object({
   arguments: z.array(z.string().max(500)).max(32).default([]),
   executable: z.enum(["node", "pnpm"]),
@@ -151,10 +193,15 @@ export const developmentCheckSchema = z.object({
   workingDirectory: workspaceRelativePathSchema.optional()
 });
 
+export const developmentAcceptanceCriterionIdSchema = z
+  .string()
+  .trim()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,99}$/);
+
 export const developmentAcceptanceCriterionSchema = z.object({
   check: developmentCheckSchema,
   description: z.string().trim().min(1).max(2_000),
-  id: z.string().trim().regex(/^[a-z0-9][a-z0-9_-]{0,99}$/)
+  id: developmentAcceptanceCriterionIdSchema
 });
 
 export const developmentAcceptanceCriteriaSchema = z
@@ -169,29 +216,86 @@ export type DevelopmentAcceptanceCriteria = z.infer<
   typeof developmentAcceptanceCriteriaSchema
 >;
 
-export const developmentBudgetSchema = z.object({
-  maxCommandMs: z.number().int().positive().max(30 * 60 * 1_000),
-  maxCommandOutputBytes: z.number().int().positive().max(10_000_000),
-  maxContextBytes: z.number().int().positive().max(2_000_000),
-  maxCostUsdMicros: z.number().int().nonnegative(),
-  maxDiffBytes: z.number().int().positive().max(100_000_000),
-  maxModelInvocations: z.number().int().positive().max(20),
-  maxTokens: z.number().int().positive().max(10_000_000),
-  maxToolCalls: z.number().int().positive().max(10_000),
-  maxWallClockMs: z.number().int().positive().max(24 * 60 * 60 * 1_000),
-  maxWorkspaceBytes: z.number().int().positive().max(2_000_000_000)
-});
+export const developmentArchitectureReferenceSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(500)
+  .regex(
+    /^[^#]+#[a-z0-9][a-z0-9-]{0,199}$/,
+    "Architecture reference must identify an authority heading"
+  )
+  .refine((reference) => {
+    const separator = reference.indexOf("#");
+    const path = reference.slice(0, separator);
+    const parsed = workspaceRelativePathSchema.safeParse(path);
+    return parsed.success && parsed.data === path;
+  }, "Architecture reference must use a normalized workspace-relative authority path");
+
+export const developmentReviewFindingSchema = z
+  .object({
+    acceptanceCriterionId: developmentAcceptanceCriterionIdSchema,
+    architectureReference: developmentArchitectureReferenceSchema,
+    category: z.enum([
+      "acceptance",
+      "architecture",
+      "correctness",
+      "maintainability",
+      "scope",
+      "security",
+      "testing"
+    ]),
+    finding: z.string().trim().min(1).max(4_000),
+    relevantPath: workspaceRelativePathSchema.optional(),
+    requiredCorrection: z.string().trim().min(1).max(4_000),
+    severity: z.enum(["critical", "high", "medium", "low"])
+  })
+  .strict();
+export type DevelopmentReviewFinding = z.infer<typeof developmentReviewFindingSchema>;
+
+export const developmentReviewResultSchema = z.discriminatedUnion("decision", [
+  z
+    .object({
+      decision: z.literal("APPROVE"),
+      findings: z.array(developmentReviewFindingSchema).length(0)
+    })
+    .strict(),
+  z
+    .object({
+      decision: z.literal("REQUEST_CHANGES"),
+      findings: z.array(developmentReviewFindingSchema).min(1).max(64)
+    })
+    .strict()
+]);
+export type DevelopmentReviewResult = z.infer<typeof developmentReviewResultSchema>;
+
+export const developmentBudgetSchema = z
+  .object({
+    maxCommandMs: z.number().int().positive().max(30 * 60 * 1_000),
+    maxCommandOutputBytes: z.number().int().positive().max(10_000_000),
+    maxContextBytes: z.number().int().positive().max(2_000_000),
+    maxCostUsdMicros: z.number().int().nonnegative(),
+    maxDiffBytes: z.number().int().positive().max(100_000_000),
+    maxModelInvocations: z.number().int().positive().max(20),
+    maxTokens: z.number().int().positive().max(10_000_000),
+    maxToolCalls: z.number().int().positive().max(10_000),
+    maxWallClockMs: z.number().int().positive().max(24 * 60 * 60 * 1_000),
+    maxWorkspaceBytes: z.number().int().positive().max(2_000_000_000)
+  })
+  .strict();
 export type DevelopmentBudget = z.infer<typeof developmentBudgetSchema>;
 
-export const developmentUsageSchema = z.object({
-  commandMs: z.number().int().nonnegative(),
-  commandOutputBytes: z.number().int().nonnegative(),
-  costUsdMicros: z.number().int().nonnegative(),
-  inputTokens: z.number().int().nonnegative(),
-  modelInvocations: z.number().int().nonnegative(),
-  outputTokens: z.number().int().nonnegative(),
-  toolCalls: z.number().int().nonnegative()
-});
+export const developmentUsageSchema = z
+  .object({
+    commandMs: z.number().int().nonnegative(),
+    commandOutputBytes: z.number().int().nonnegative(),
+    costUsdMicros: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    modelInvocations: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    toolCalls: z.number().int().nonnegative()
+  })
+  .strict();
 export type DevelopmentUsage = z.infer<typeof developmentUsageSchema>;
 
 export const emptyDevelopmentUsage = (): DevelopmentUsage => ({
@@ -204,20 +308,38 @@ export const emptyDevelopmentUsage = (): DevelopmentUsage => ({
   toolCalls: 0
 });
 
-export const developmentContextManifestSchema = z.object({
-  entries: z
-    .array(
-      z.object({
-        blobId: gitObjectIdSchema,
-        bytes: z.number().int().nonnegative(),
-        path: workspaceRelativePathSchema,
-        source: z.enum(["authority", "repository"])
-      })
-    )
-    .max(256),
-  totalBytes: z.number().int().nonnegative()
-});
+export const developmentContextManifestSchema = z
+  .object({
+    entries: z
+      .array(
+        z
+          .object({
+            blobId: gitObjectIdSchema,
+            bytes: z.number().int().nonnegative(),
+            path: workspaceRelativePathSchema,
+            source: z.enum(["authority", "repository"])
+          })
+          .strict()
+      )
+      .max(256),
+    totalBytes: z.number().int().nonnegative()
+  })
+  .strict();
 export type DevelopmentContextManifest = z.infer<typeof developmentContextManifestSchema>;
+
+export const developmentReviewerContextManifestSchema = developmentContextManifestSchema.extend({
+  authorityReferences: z
+    .array(developmentArchitectureReferenceSchema)
+    .min(1)
+    .max(512)
+    .refine(
+      (references) => new Set(references).size === references.length,
+      "Reviewer authority references must be unique"
+    )
+});
+export type DevelopmentReviewerContextManifest = z.infer<
+  typeof developmentReviewerContextManifestSchema
+>;
 
 const developmentTaskTransitions: Readonly<
   Record<DevelopmentTaskStatus, readonly DevelopmentTaskStatus[]>

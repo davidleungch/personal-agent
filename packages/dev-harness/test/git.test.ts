@@ -117,6 +117,61 @@ describe("trusted Git and worktree authority", () => {
     await expect(fixture.git.verifyCandidateRef(attemptId(), fixture.base)).resolves.toBeUndefined();
   });
 
+  it("retains one exact reviewed candidate without making the retention ref identity authority", async () => {
+    const fixture = await repository();
+    const id = attemptId();
+    const workspace = await fixture.git.createWorktree(id, fixture.base);
+    await writeFile(join(workspace, "src/value.txt"), "reviewed candidate\n");
+    const candidate = await fixture.git.captureCandidate({
+      allowedPaths: ["src"],
+      attemptId: id,
+      baseCommit: fixture.base,
+      forbiddenPaths: [],
+      maxDiffBytes: 100_000,
+      workspacePath: workspace
+    });
+    const reviewId = attemptId();
+    const retained = await fixture.git.ensureReviewRetentionRef(reviewId, candidate.commit);
+    expect(retained).toEqual({
+      commit: candidate.commit,
+      ref: `refs/personal-agent/reviews/${reviewId}`
+    });
+    await expect(fixture.git.ensureReviewRetentionRef(reviewId, candidate.commit)).resolves.toEqual(retained);
+    await fixture.git.removeWorktree(workspace);
+    execFileSync("git", ["update-ref", "-d", candidate.ref], { cwd: fixture.path });
+    execFileSync("git", ["reflog", "expire", "--expire=now", "--all"], { cwd: fixture.path });
+    execFileSync("git", ["gc", "--prune=now"], { cwd: fixture.path });
+    await expect(fixture.git.resolveCommit(candidate.commit)).resolves.toBe(candidate.commit);
+    await expect(
+      fixture.git.verifyReviewRetentionRef(reviewId, candidate.commit)
+    ).resolves.toEqual(retained);
+
+    execFileSync("git", ["update-ref", retained.ref, fixture.base], { cwd: fixture.path });
+    await expect(
+      fixture.git.verifyReviewRetentionRef(reviewId, candidate.commit)
+    ).rejects.toThrow("does not match");
+    await expect(fixture.git.ensureReviewRetentionRef(reviewId, candidate.commit)).rejects.toThrow(
+      "does not match"
+    );
+    await expect(
+      fixture.git.verifyReviewRetentionRef(attemptId(), candidate.commit)
+    ).resolves.toBeUndefined();
+    expect(() => fixture.git.reviewRetentionRef("bad")).toThrow("invalid");
+
+    execFileSync("git", ["update-ref", "-d", retained.ref], { cwd: fixture.path });
+    execFileSync("git", ["reflog", "expire", "--expire=now", "--all"], { cwd: fixture.path });
+    execFileSync("git", ["gc", "--prune=now"], { cwd: fixture.path });
+    await expect(fixture.git.ensureReviewRetentionRef(reviewId, candidate.commit)).rejects.toBeDefined();
+
+    const namespaceConflict = await repository();
+    execFileSync("git", ["update-ref", "refs/personal-agent/reviews", namespaceConflict.base], {
+      cwd: namespaceConflict.path
+    });
+    await expect(
+      namespaceConflict.git.ensureReviewRetentionRef(attemptId(), namespaceConflict.base)
+    ).rejects.toThrow("corrupt");
+  });
+
   it("rejects empty, out-of-scope, forbidden, generated, native, symlink, and secret candidates", async () => {
     const fixture = await repository();
 
