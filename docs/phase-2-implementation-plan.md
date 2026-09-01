@@ -15,7 +15,7 @@ Current status:
 | Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C NOT STARTED** |
 | Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
 | Phase 2B — Independent Reviewer | **COMPLETE** |
-| Phase 2C — Autonomous Fix Loop | **NOT STARTED / NOT AUTHORIZED** |
+| Phase 2C — Autonomous Fix Loop | **NOT STARTED / NOT AUTHORIZED FOR IMPLEMENTATION** |
 | Phase 2D — Auto-Merge + Deploy | **NOT STARTED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
@@ -23,8 +23,11 @@ Current status:
 Phase 2A was separately authorized by the user and completed on 2026-08-28.
 Phase 2B was separately authorized and independently accepted at checkpoint
 `f51aa91437317b1c9a6f66f4ae510748a9abb0e0`. Its completion does not authorize
-Phase 2C. Each later milestone requires separate authorization after review of
-the preceding milestone. No milestone passing implicitly starts the next one.
+Phase 2C. [`phase-2c-bounded-fix-loop.md`](phase-2c-bounded-fix-loop.md) is the
+approved governing contract for future Phase 2C planning and implementation;
+its presence does not authorize either activity. Each later milestone requires
+separate authorization after review of the preceding milestone. No milestone
+passing implicitly starts the next one.
 
 [`implementation-plan.md`](implementation-plan.md) and
 [`phase-1-acceptance.md`](phase-1-acceptance.md) remain the historical Phase 1
@@ -804,9 +807,13 @@ exactly 100% for statements, branches, functions, and lines; and Node 22.19.0
 validation passed. No Phase 2C, merge, push, deployment, or Phase 3 authority was
 present during acceptance.
 
-Phase 2C remains **NOT STARTED / NOT AUTHORIZED**.
+Phase 2C remains **NOT STARTED / NOT AUTHORIZED FOR IMPLEMENTATION**.
 
 # Phase 2C — Autonomous Fix Loop
+
+[`phase-2c-bounded-fix-loop.md`](phase-2c-bounded-fix-loop.md) is the governing
+contract for future Phase 2C planning and implementation. Phase 2C remains **NOT
+STARTED / NOT AUTHORIZED FOR IMPLEMENTATION**.
 
 ## Contract
 
