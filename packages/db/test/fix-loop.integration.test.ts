@@ -379,6 +379,42 @@ describe("Phase 2C durable fix-loop authority", () => {
     )).rejects.toBeDefined();
   });
 
+  it("reclaims an interrupted fix attempt again after recovery worker loss", async () => {
+    const fixture = await initialCandidate();
+    const rejected = await reviewCandidate(fixture.task.id, "REQUEST_CHANGES");
+    await createFixLoopRepositories(database).reconcileCurrentReview({ reviewId: rejected.id });
+    const development = createDevelopmentRepositories(database);
+    const claim = (await development.claimFixRequiredDevelopmentTask({
+      budget,
+      contextPolicy,
+      leaseDurationMs: 60_000,
+      modelProfile: "fast",
+      runnerId: "fix-owner",
+      taskId: fixture.task.id
+    }))!;
+
+    await pool.query(
+      "update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1",
+      [claim.attempt.id]
+    );
+    const firstRecovery = await development.reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000,
+      now: new Date(),
+      runnerId: "recovery-one"
+    });
+    expect(firstRecovery).toMatchObject({ status: "interrupted", leaseGeneration: 2 });
+
+    await pool.query(
+      "update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1",
+      [claim.attempt.id]
+    );
+    await expect(development.reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000,
+      now: new Date(),
+      runnerId: "recovery-two"
+    })).resolves.toMatchObject({ status: "interrupted", leaseGeneration: 3 });
+  });
+
   it("bounds three candidate-specific semantic rounds and never revives an old review", async () => {
     const fixture = await initialCandidate();
     let review = await reviewCandidate(fixture.task.id, "REQUEST_CHANGES", [finding({ text: "round zero" })]);

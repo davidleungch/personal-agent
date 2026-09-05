@@ -594,10 +594,11 @@ export function createDevelopmentRepositories(
         .parse(input);
       return database.transaction(async (transaction) => {
         const candidates = await transaction
-          .select({ id: developmentAttempts.id, taskId: developmentAttempts.taskId })
+          .select({ id: developmentAttempts.id, taskId: developmentAttempts.taskId, fixIteration: developmentAttempts.fixIteration })
           .from(developmentAttempts)
           .innerJoin(developmentTasks, eq(developmentTasks.id, developmentAttempts.taskId))
-          .where(sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')
+          .where(sql`(${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')
+              or (${developmentAttempts.status} = 'interrupted' and ${developmentAttempts.fixIteration} is not null))
             and ${developmentTasks.status} in ('preparing', 'implementing', 'testing')`)
           .orderBy(asc(developmentAttempts.leaseExpiresAt), asc(developmentAttempts.id))
           .limit(recoveryCandidateLimit);
@@ -618,7 +619,8 @@ export function createDevelopmentRepositories(
                 .select()
                 .from(developmentAttempts)
                 .where(sql`${developmentAttempts.id} = ${candidate.id}
-                  and ${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
+                  and (${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')
+                    or (${developmentAttempts.status} = 'interrupted' and ${developmentAttempts.fixIteration} is not null))`)
                 .limit(1)
                 .for("update", { skipLocked: true });
               if (!attempt) throw new SkipRecoveryCandidate();
