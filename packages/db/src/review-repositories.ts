@@ -35,6 +35,9 @@ import {
 
 const uuidSchema = z.string().uuid();
 const positiveDurationSchema = z.number().int().positive();
+const recoveryCandidateLimit = 100;
+
+class SkipRecoveryCandidate extends Error {}
 
 type ReviewTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
@@ -666,68 +669,82 @@ export function createReviewRepositories(
         runnerId: shortText
       }).strict().parse(input);
       return database.transaction(async (transaction) => {
-        const [candidate] = await transaction
+        const candidates = await transaction
           .select({ id: developmentReviews.id, taskId: developmentReviews.taskId, attemptId: developmentReviews.implementerAttemptId })
           .from(developmentReviews)
-          .where(sql`${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`)
+          .innerJoin(developmentTasks, eq(developmentTasks.id, developmentReviews.taskId))
+          .where(sql`${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')
+            and (${developmentTasks.status} = 'candidate_ready'
+              or (${developmentTasks.status} = 'blocked' and ${developmentTasks.authorityInvalidatedAt} is not null))`)
           .orderBy(asc(developmentReviews.leaseExpiresAt), asc(developmentReviews.id))
-          .limit(1);
-        if (!candidate) return undefined;
-        const [task] = await transaction
-          .select()
-          .from(developmentTasks)
-          .where(eq(developmentTasks.id, candidate.taskId))
-          .limit(1)
-          .for("update", { skipLocked: true });
-        if (
-          !task ||
-          (task.status !== "candidate_ready" &&
-            !(task.status === "blocked" && task.authorityInvalidatedAt !== null))
-        ) return undefined;
-        await transaction
-          .select()
-          .from(developmentAttempts)
-          .where(eq(developmentAttempts.id, candidate.attemptId))
-          .limit(1)
-          .for("update");
-        const review = (await transaction
-          .select()
-          .from(developmentReviews)
-          .where(sql`${developmentReviews.id} = ${candidate.id}
-            and ${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`)
-          .limit(1)
-          .for("update"))[0]!;
-        await testHooks.afterReclaimLock?.(review.id);
-        const databaseNow = await freshDatabaseTime(transaction);
-        if (review.leaseExpiresAt > databaseNow) return undefined;
-        const leaseGeneration = review.leaseGeneration + 1;
-        const status = review.status === "preparing" || review.status === "reviewing"
-          ? "interrupted"
-          : review.status;
-        const [updated] = await transaction
-          .update(developmentReviews)
-          .set({
-            failureClass: status === "interrupted" ? (review.failureClass ?? "lease_expired") : review.failureClass,
-            leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
-            leaseGeneration,
-            leaseOwner: value.runnerId,
-            status,
-            updatedAt: databaseNow
-          })
-          .where(eq(developmentReviews.id, review.id))
-          .returning();
-        await insertEvent(transaction, {
-          createdAt: updated!.updatedAt,
-          kind: "transition",
-          reviewId: review.id,
-          safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired", to_status: status },
-          status: "unknown"
-        });
-        return {
-          ...updated!,
-          authorityInvalidated: task.authorityInvalidatedAt !== null || task.status === "blocked",
-          taskStatus: task.status
-        };
+          .limit(recoveryCandidateLimit);
+
+        for (const candidate of candidates) {
+          try {
+            return await transaction.transaction(async (candidateTransaction) => {
+              const [task] = await candidateTransaction
+                .select()
+                .from(developmentTasks)
+                .where(eq(developmentTasks.id, candidate.taskId))
+                .limit(1)
+                .for("update", { skipLocked: true });
+              if (
+                !task ||
+                (task.status !== "candidate_ready" &&
+                  !(task.status === "blocked" && task.authorityInvalidatedAt !== null))
+              ) throw new SkipRecoveryCandidate();
+              const [attempt] = await candidateTransaction
+                .select()
+                .from(developmentAttempts)
+                .where(eq(developmentAttempts.id, candidate.attemptId))
+                .limit(1)
+                .for("update", { skipLocked: true });
+              if (!attempt) throw new SkipRecoveryCandidate();
+              const [review] = await candidateTransaction
+                .select()
+                .from(developmentReviews)
+                .where(sql`${developmentReviews.id} = ${candidate.id}
+                  and ${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`)
+                .limit(1)
+                .for("update", { skipLocked: true });
+              if (!review) throw new SkipRecoveryCandidate();
+              await testHooks.afterReclaimLock?.(review.id);
+              const databaseNow = await freshDatabaseTime(candidateTransaction);
+              if (review.leaseExpiresAt > databaseNow) throw new SkipRecoveryCandidate();
+              const leaseGeneration = review.leaseGeneration + 1;
+              const status = review.status === "preparing" || review.status === "reviewing"
+                ? "interrupted"
+                : review.status;
+              const [updated] = await candidateTransaction
+                .update(developmentReviews)
+                .set({
+                  failureClass: status === "interrupted" ? (review.failureClass ?? "lease_expired") : review.failureClass,
+                  leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
+                  leaseGeneration,
+                  leaseOwner: value.runnerId,
+                  status,
+                  updatedAt: databaseNow
+                })
+                .where(eq(developmentReviews.id, review.id))
+                .returning();
+              await insertEvent(candidateTransaction, {
+                createdAt: updated!.updatedAt,
+                kind: "transition",
+                reviewId: review.id,
+                safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired", to_status: status },
+                status: "unknown"
+              });
+              return {
+                ...updated!,
+                authorityInvalidated: task.authorityInvalidatedAt !== null || task.status === "blocked",
+                taskStatus: task.status
+              };
+            });
+          } catch (error) {
+            if (!(error instanceof SkipRecoveryCandidate)) throw error;
+          }
+        }
+        return undefined;
       });
     },
 

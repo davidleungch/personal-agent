@@ -38,6 +38,9 @@ import {
 
 const uuidSchema = z.string().uuid();
 const positiveDurationSchema = z.number().int().positive();
+const recoveryCandidateLimit = 100;
+
+class SkipRecoveryCandidate extends Error {}
 
 export class DevelopmentLeaseError extends Error {}
 export class DevelopmentTransitionError extends Error {}
@@ -79,9 +82,14 @@ function addUsage(current: DevelopmentUsage, delta: DevelopmentUsage): Developme
   };
 }
 
+export type DevelopmentRepositoryTestHooks = {
+  afterReclaimLock?: (attemptId: string) => Promise<void>;
+};
+
 export function createDevelopmentRepositories(
   database: Database,
-  knownSecrets: readonly string[] = []
+  knownSecrets: readonly string[] = [],
+  testHooks: DevelopmentRepositoryTestHooks = {}
 ) {
   const secretFreeText = createSecretFreeTextSchema(knownSecrets);
   const shortText = secretFreeText.trim().min(1).max(500);
@@ -585,54 +593,69 @@ export function createDevelopmentRepositories(
         })
         .parse(input);
       return database.transaction(async (transaction) => {
-        const [candidate] = await transaction
+        const candidates = await transaction
           .select({ id: developmentAttempts.id, taskId: developmentAttempts.taskId })
           .from(developmentAttempts)
-          .where(sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
+          .innerJoin(developmentTasks, eq(developmentTasks.id, developmentAttempts.taskId))
+          .where(sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')
+            and ${developmentTasks.status} in ('preparing', 'implementing', 'testing')`)
           .orderBy(asc(developmentAttempts.leaseExpiresAt), asc(developmentAttempts.id))
-          .limit(1);
-        if (!candidate) return undefined;
-        const [task] = await transaction
-          .select()
-          .from(developmentTasks)
-          .where(eq(developmentTasks.id, candidate.taskId))
-          .limit(1)
-          .for("update", { skipLocked: true });
-        if (!task || !["preparing", "implementing", "testing"].includes(task.status)) return undefined;
-        const attempt = (await transaction
-          .select()
-          .from(developmentAttempts)
-          .where(sql`${developmentAttempts.id} = ${candidate.id}
-            and ${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
-          .limit(1)
-          .for("update"))[0]!;
-        const databaseNow = await freshDatabaseTime(transaction);
-        if (!attempt.leaseExpiresAt || attempt.leaseExpiresAt > databaseNow) return undefined;
+          .limit(recoveryCandidateLimit);
 
-        const leaseGeneration = attempt.leaseGeneration + 1;
-        const [updatedAttempt] = await transaction
-          .update(developmentAttempts)
-          .set({
-            leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
-            leaseGeneration,
-            leaseOwner: value.runnerId,
-            status: "interrupted",
-            updatedAt: databaseNow
-          })
-          .where(eq(developmentAttempts.id, attempt.id))
-          .returning();
-        await transaction
-          .update(developmentTasks)
-          .set({ status: attempt.fixIteration ? "preparing" : "blocked", updatedAt: databaseNow })
-          .where(eq(developmentTasks.id, attempt.taskId));
-        await insertEvent(transaction, {
-          attemptId: attempt.id,
-          createdAt: databaseNow,
-          kind: "transition",
-          safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired" },
-          status: "unknown"
-        });
-        return updatedAttempt!;
+        for (const candidate of candidates) {
+          try {
+            return await transaction.transaction(async (candidateTransaction) => {
+              const [task] = await candidateTransaction
+                .select()
+                .from(developmentTasks)
+                .where(eq(developmentTasks.id, candidate.taskId))
+                .limit(1)
+                .for("update", { skipLocked: true });
+              if (!task || !["preparing", "implementing", "testing"].includes(task.status)) {
+                throw new SkipRecoveryCandidate();
+              }
+              const [attempt] = await candidateTransaction
+                .select()
+                .from(developmentAttempts)
+                .where(sql`${developmentAttempts.id} = ${candidate.id}
+                  and ${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
+                .limit(1)
+                .for("update", { skipLocked: true });
+              if (!attempt) throw new SkipRecoveryCandidate();
+              const databaseNow = await freshDatabaseTime(candidateTransaction);
+              if (!attempt.leaseExpiresAt || attempt.leaseExpiresAt > databaseNow) throw new SkipRecoveryCandidate();
+              await testHooks.afterReclaimLock?.(attempt.id);
+
+              const leaseGeneration = attempt.leaseGeneration + 1;
+              const [updatedAttempt] = await candidateTransaction
+                .update(developmentAttempts)
+                .set({
+                  leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
+                  leaseGeneration,
+                  leaseOwner: value.runnerId,
+                  status: "interrupted",
+                  updatedAt: databaseNow
+                })
+                .where(eq(developmentAttempts.id, attempt.id))
+                .returning();
+              await candidateTransaction
+                .update(developmentTasks)
+                .set({ status: attempt.fixIteration ? "preparing" : "blocked", updatedAt: databaseNow })
+                .where(eq(developmentTasks.id, attempt.taskId));
+              await insertEvent(candidateTransaction, {
+                attemptId: attempt.id,
+                createdAt: databaseNow,
+                kind: "transition",
+                safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired" },
+                status: "unknown"
+              });
+              return updatedAttempt!;
+            });
+          } catch (error) {
+            if (!(error instanceof SkipRecoveryCandidate)) throw error;
+          }
+        }
+        return undefined;
       });
     },
 

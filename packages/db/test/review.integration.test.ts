@@ -352,6 +352,64 @@ describe("Phase 2B review persistence", () => {
     })).resolves.toMatchObject({ status: "failed" });
   });
 
+  it("skips a locked review task and reclaims a later review, then reclaims the locked review", async () => {
+    const first = await candidateReady(new Date("2026-08-28T00:00:00.000Z"));
+    const second = await candidateReady(new Date("2026-08-28T00:00:01.000Z"));
+    const reviews = createReviewRepositories(database);
+    const claimA = (await reviews.claimCandidateReadyReview({
+      budget, contextPolicy, leaseDurationMs: 60_000, modelProfile: "fast", runnerId: "review-a"
+    }))!;
+    const claimB = (await reviews.claimCandidateReadyReview({
+      budget, contextPolicy, leaseDurationMs: 60_000, modelProfile: "fast", runnerId: "review-b"
+    }))!;
+    expect(claimA.review.taskId).toBe(first.task.id);
+    expect(claimB.review.taskId).toBe(second.task.id);
+    await pool.query("update development_reviews set lease_expires_at = clock_timestamp() - interval '1 second' where id in ($1, $2)", [claimA.review.id, claimB.review.id]);
+
+    const blocker = await pool.connect();
+    await blocker.query("begin");
+    await blocker.query("select id from development_tasks where id = $1 for update", [first.task.id]);
+    try {
+      const reclaimedB = await reviews.reclaimReview({ leaseDurationMs: 60_000, runnerId: "recover-b" });
+      expect(reclaimedB).toMatchObject({ id: claimB.review.id, taskStatus: "candidate_ready" });
+      expect(reclaimedB?.leaseGeneration).toBe(2);
+    } finally {
+      await blocker.query("commit");
+      blocker.release();
+    }
+    const attemptBlocker = await pool.connect();
+    await attemptBlocker.query("begin");
+    await attemptBlocker.query("select id from development_attempts where id = $1 for update", [claimA.review.implementerAttemptId]);
+    await expect(reviews.reclaimReview({ leaseDurationMs: 60_000, runnerId: "attempt-skip" })).resolves.toBeUndefined();
+    await attemptBlocker.query("commit");
+    attemptBlocker.release();
+
+    const reviewBlocker = await pool.connect();
+    await reviewBlocker.query("begin");
+    await reviewBlocker.query("select id from development_reviews where id = $1 for update", [claimA.review.id]);
+    await expect(reviews.reclaimReview({ leaseDurationMs: 60_000, runnerId: "review-skip" })).resolves.toBeUndefined();
+    await reviewBlocker.query("commit");
+    reviewBlocker.release();
+
+    const reclaimedA = await reviews.reclaimReview({ leaseDurationMs: 60_000, runnerId: "recover-a" });
+    expect(reclaimedA).toMatchObject({ id: claimA.review.id, taskStatus: "candidate_ready" });
+    expect(reclaimedA?.leaseGeneration).toBe(2);
+  });
+
+  it("propagates unexpected Reviewer recovery errors instead of treating them as contention", async () => {
+    const fixture = await candidateReady();
+    const claim = (await createReviewRepositories(database).claimCandidateReadyReview({
+      budget, contextPolicy, leaseDurationMs: 60_000, modelProfile: "fast", runnerId: "error-owner"
+    }))!;
+    await pool.query("update development_reviews set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1", [claim.review.id]);
+    const failing = createReviewRepositories(database, [], {
+      afterReclaimLock: async () => { throw new Error("unexpected review recovery failure"); }
+    });
+    await expect(failing.reclaimReview({ leaseDurationMs: 60_000, runnerId: "error-recoverer" })).rejects.toThrow("unexpected review recovery failure");
+    await expect(createReviewRepositories(database).reclaimReview({ leaseDurationMs: 60_000, runnerId: "cleanup-recoverer" })).resolves.toMatchObject({ id: claim.review.id });
+    expect(fixture.task.id).toBe(claim.review.taskId);
+  });
+
   it("uses PostgreSQL time exclusively for Reviewer lease creation, renewal, and reclamation", async () => {
     await candidateReady();
     const reviews = createReviewRepositories(database);

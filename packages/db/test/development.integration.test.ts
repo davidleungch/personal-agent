@@ -377,6 +377,68 @@ describe("Phase 2A development persistence", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("skips a locked task during attempt recovery and reclaims a later attempt", async () => {
+    const repositories = createDevelopmentRepositories(database);
+    const firstTask = await repositories.createApprovedDevelopmentTask({
+      acceptanceCriteria, approvedAt: new Date("2026-08-27T02:30:00.000Z"), approvedSpec: "First", baseCommit: commit, title: "First recovery"
+    });
+    const secondTask = await repositories.createApprovedDevelopmentTask({
+      acceptanceCriteria, approvedAt: new Date("2026-08-27T02:30:01.000Z"), approvedSpec: "Second", baseCommit: commit, title: "Second recovery"
+    });
+    const firstClaim = (await repositories.claimReadyDevelopmentTask({
+      budget, leaseDurationMs: 60_000, modelProfile: "fast", now: new Date(), runnerId: "attempt-a"
+    }))!;
+    const secondClaim = (await repositories.claimReadyDevelopmentTask({
+      budget, leaseDurationMs: 60_000, modelProfile: "fast", now: new Date(), runnerId: "attempt-b"
+    }))!;
+    await pool.query("update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id in ($1, $2)", [firstClaim.attempt.id, secondClaim.attempt.id]);
+
+    const blocker = await pool.connect();
+    await blocker.query("begin");
+    await blocker.query("select id from development_tasks where id = $1 for update", [firstTask.id]);
+    try {
+      const reclaimed = await repositories.reclaimExpiredDevelopmentAttempt({ leaseDurationMs: 60_000, now: new Date(), runnerId: "recover-b" });
+      expect(reclaimed).toMatchObject({ id: secondClaim.attempt.id, leaseGeneration: 2, status: "interrupted" });
+    } finally {
+      await blocker.query("commit");
+      blocker.release();
+    }
+    const attemptBlocker = await pool.connect();
+    await attemptBlocker.query("begin");
+    await attemptBlocker.query("select id from development_attempts where id = $1 for update", [firstClaim.attempt.id]);
+    await expect(repositories.reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000, now: new Date(), runnerId: "attempt-skip"
+    })).resolves.toBeUndefined();
+    await attemptBlocker.query("commit");
+    attemptBlocker.release();
+
+    await expect(repositories.reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000, now: new Date(), runnerId: "recover-a"
+    })).resolves.toMatchObject({ id: firstClaim.attempt.id, leaseGeneration: 2 });
+    expect(secondTask.id).not.toBe(firstTask.id);
+  });
+
+  it("propagates unexpected recovery errors instead of treating them as contention", async () => {
+    const repositories = createDevelopmentRepositories(database);
+    const task = await repositories.createApprovedDevelopmentTask({
+      acceptanceCriteria, approvedAt: new Date(), approvedSpec: "Unexpected error", baseCommit: commit, title: "Recovery error"
+    });
+    const claim = (await repositories.claimReadyDevelopmentTask({
+      budget, leaseDurationMs: 60_000, modelProfile: "fast", now: new Date(), runnerId: "error-owner"
+    }))!;
+    await pool.query("update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1", [claim.attempt.id]);
+    const failing = createDevelopmentRepositories(database, [], {
+      afterReclaimLock: async () => { throw new Error("unexpected recovery failure"); }
+    });
+    await expect(failing.reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000, now: new Date(), runnerId: "error-recoverer"
+    })).rejects.toThrow("unexpected recovery failure");
+    await expect(createDevelopmentRepositories(database).reclaimExpiredDevelopmentAttempt({
+      leaseDurationMs: 60_000, now: new Date(), runnerId: "cleanup-recoverer"
+    })).resolves.toMatchObject({ id: claim.attempt.id });
+    expect(task.id).toBe(claim.task.id);
+  });
+
   it("enforces immutable contracts, exact base binding, restrictive history, and append-only events", async () => {
     const repositories = createDevelopmentRepositories(database);
     const now = new Date("2026-08-27T03:00:00.000Z");
