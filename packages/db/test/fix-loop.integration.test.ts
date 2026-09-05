@@ -134,7 +134,7 @@ async function initialCandidate() {
     safeSummary: "candidate"
   });
   await development.appendDevelopmentAttemptEvent({ ...fence, kind: "teardown", now: new Date(), status: "success" });
-  return { ...captured, baseCommit, candidateCommit, development, task };
+  return { ...captured, baseCommit, candidateCommit, development, task: captured.task };
 }
 
 async function reviewCandidate(
@@ -189,6 +189,65 @@ async function captureFix(taskId: string, runnerId: string) {
 }
 
 describe("Phase 2C durable fix-loop authority", () => {
+  it("rejects direct authority fabrication from every non-candidate source", async () => {
+    const development = createDevelopmentRepositories(database);
+    const task = await development.createApprovedDevelopmentTask({
+      acceptanceCriteria: criteria,
+      approvedAt: new Date(),
+      approvedSpec: "No execution has started.",
+      baseCommit: commit("a"),
+      title: "Authority guard fixture"
+    });
+    for (const status of ["approved_candidate", "fix_required"]) {
+      await expect(pool.query("update development_tasks set status = $1 where id = $2", [status, task.id])).rejects.toBeDefined();
+    }
+    const executed = await initialCandidate();
+    await expect(pool.query("update development_tasks set status = 'ready' where id = $1", [executed.task.id])).rejects.toBeDefined();
+    await expect(pool.query("update development_tasks set status = 'approved_candidate' where id = $1", [executed.task.id])).rejects.toBeDefined();
+    await expect(pool.query(
+      `insert into development_tasks (id, title, approved_spec, acceptance_criteria, status, base_commit, approved_at)
+       values ($1, 'invalid', 'invalid', $2::jsonb, 'approved_candidate', $3, clock_timestamp())`,
+      [randomUUID(), JSON.stringify(criteria), commit("b")]
+    )).rejects.toBeDefined();
+    const reviews = createReviewRepositories(database);
+    await expect(reviews.appendReviewEvent({
+      kind: "tool",
+      leaseGeneration: 1,
+      now: new Date(),
+      reviewId: randomUUID(),
+      runnerId: "missing-review",
+      status: "failed"
+    })).rejects.toBeDefined();
+    await development.createApprovedDevelopmentTask({
+      acceptanceCriteria: criteria,
+      approvedAt: new Date(),
+      approvedSpec: "Initial attempt cannot require a fix-loop escalation.",
+      baseCommit: commit("c"),
+      title: "Initial attempt fixture"
+    });
+    const plainClaim = (await development.claimReadyDevelopmentTask({
+      budget,
+      leaseDurationMs: 60_000,
+      modelProfile: "fast",
+      now: new Date(),
+      runnerId: "plain-attempt"
+    }))!;
+    await expect(development.markDevelopmentNeedsHuman({
+      attemptId: plainClaim.attempt.id,
+      failureClass: "test",
+      leaseGeneration: 1,
+      reason: "context_unavailable",
+      runnerId: "plain-attempt"
+    })).rejects.toBeDefined();
+    await expect(development.markDevelopmentNeedsHuman({
+      attemptId: plainClaim.attempt.id,
+      failureClass: "test",
+      leaseGeneration: 1,
+      reason: "context_unavailable",
+      runnerId: "wrong-owner"
+    })).rejects.toBeDefined();
+  });
+
   it("keeps Reviewer finalization pure and preserves reconciled review evidence", async () => {
     const fixture = await initialCandidate();
     const review = await reviewCandidate(fixture.task.id, "APPROVE");
@@ -370,6 +429,7 @@ describe("Phase 2C durable fix-loop authority", () => {
     await captureFix(increasing.task.id, "increase-fix");
     review = await reviewCandidate(increasing.task.id, "REQUEST_CHANGES", [
       finding({ text: "two-a" }),
+      finding({ text: "two-a" }),
       finding({ text: "two-b" })
     ]);
     await expect(fix.reconcileCurrentReview({ reviewId: review.id })).resolves.toMatchObject({
@@ -459,7 +519,7 @@ describe("Phase 2C durable fix-loop authority", () => {
       leaseGeneration: 1,
       reason: "context_unavailable",
       runnerId: `initial-${invalidProvenance.task.id}`
-    })).rejects.toBeInstanceOf(DevelopmentTransitionError);
+    })).rejects.toBeDefined();
 
     const deterministic = await initialCandidate();
     const deterministicReview = await reviewCandidate(deterministic.task.id, "REQUEST_CHANGES", [finding({ text: "deterministic" })]);

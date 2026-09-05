@@ -348,6 +348,18 @@ AS $$
 DECLARE
 	current_review development_reviews%ROWTYPE;
 BEGIN
+	IF TG_OP = 'INSERT' THEN
+		IF NEW.status <> 'ready' THEN
+			RAISE EXCEPTION 'new development tasks must start in ready' USING ERRCODE = '23514';
+		END IF;
+		RETURN NEW;
+	END IF;
+	IF NEW.status = 'ready' AND (
+		OLD.status <> 'ready'
+		OR EXISTS (SELECT 1 FROM development_attempts WHERE task_id = NEW.id)
+	) THEN
+		RAISE EXCEPTION 'executed development tasks cannot return to ready' USING ERRCODE = '23514';
+	END IF;
 	IF OLD.authority_invalidated_at IS NOT NULL
 		AND NEW.authority_invalidated_at IS DISTINCT FROM OLD.authority_invalidated_at THEN
 		RAISE EXCEPTION 'development task authority invalidation is immutable' USING ERRCODE = '55000';
@@ -359,6 +371,11 @@ BEGIN
 	IF OLD.status = 'candidate_ready' AND NEW.status = 'blocked'
 		AND OLD.authority_invalidated_at IS NULL THEN
 		NEW.authority_invalidated_at := clock_timestamp();
+	END IF;
+	IF NEW.status IN ('approved_candidate', 'fix_required')
+		AND NEW.status IS DISTINCT FROM OLD.status
+		AND (OLD.status <> 'candidate_ready' OR OLD.authority_invalidated_at IS NOT NULL OR NEW.authority_invalidated_at IS NOT NULL) THEN
+		RAISE EXCEPTION 'Phase 2C authority state requires candidate_ready source' USING ERRCODE = '23514';
 	END IF;
 	IF OLD.status = 'candidate_ready'
 		AND NEW.status IN ('approved_candidate', 'fix_required') THEN
@@ -396,7 +413,7 @@ END;
 $$;
 --> statement-breakpoint
 CREATE TRIGGER development_tasks_protect_contract
-BEFORE UPDATE ON "development_tasks"
+BEFORE INSERT OR UPDATE ON "development_tasks"
 FOR EACH ROW EXECUTE FUNCTION protect_development_task_contract();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION enforce_development_attempt_binding() RETURNS trigger

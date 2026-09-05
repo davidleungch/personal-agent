@@ -98,26 +98,43 @@ export function createReviewRepositories(
     runnerId: shortText
   });
 
+  // Canonical overlapping-row order: task -> attempt -> review.
   async function lockedReview(
     transaction: ReviewTransaction,
     input: z.infer<typeof fenceSchema>
   ) {
-    const [review] = await transaction
+    const [identity] = await transaction
+      .select({ taskId: developmentReviews.taskId, attemptId: developmentReviews.implementerAttemptId })
+      .from(developmentReviews)
+      .where(eq(developmentReviews.id, input.reviewId))
+      .limit(1);
+    const [task] = await transaction
+      .select()
+      .from(developmentTasks)
+      .where(eq(developmentTasks.id, identity!.taskId))
+      .limit(1)
+      .for("update");
+    const [attempt] = await transaction
+      .select()
+      .from(developmentAttempts)
+      .where(eq(developmentAttempts.id, identity!.attemptId))
+      .limit(1)
+      .for("update");
+    const review = (await transaction
       .select()
       .from(developmentReviews)
       .where(eq(developmentReviews.id, input.reviewId))
       .limit(1)
-      .for("update");
+      .for("update"))[0]!;
     const databaseNow = await freshDatabaseTime(transaction);
     if (
-      !review ||
-      review.leaseOwner !== input.runnerId ||
+      review!.leaseOwner !== input.runnerId ||
       review.leaseGeneration !== input.leaseGeneration ||
       review.leaseExpiresAt <= databaseNow
     ) {
       throw new DevelopmentLeaseError("Development review lease is not current");
     }
-    return { databaseNow, review };
+    return { attempt, databaseNow, review, task };
   }
 
   async function insertEvent(
@@ -348,7 +365,7 @@ export function createReviewRepositories(
     }) => {
       const fence = fenceSchema.parse(input);
       return database.transaction(async (transaction) => {
-        const { databaseNow, review } = await lockedReview(transaction, fence);
+        const { attempt, databaseNow, review } = await lockedReview(transaction, fence);
         if (
           review.cleanupStatus !== "succeeded" ||
           !(
@@ -372,12 +389,6 @@ export function createReviewRepositories(
           ? developmentNeedsHumanReasonSchema.parse(input.needsHumanReason)
           : undefined;
         if (needsHumanReason) {
-          const [attempt] = await transaction
-            .select()
-            .from(developmentAttempts)
-            .where(eq(developmentAttempts.id, review.implementerAttemptId))
-            .limit(1)
-            .for("update");
           if (!attempt?.fixIteration) {
             throw new DevelopmentTransitionError("Only a fix-candidate review can require Phase 2C human action");
           }
@@ -416,7 +427,7 @@ export function createReviewRepositories(
       // Phase 2A provenance and the immutable commit ID are already durable. Mutable
       // Git retention refs are deliberately not identity inputs to this DB transition.
       return database.transaction(async (transaction) => {
-        const { databaseNow, review } = await lockedReview(transaction, fence);
+        const { attempt, databaseNow, review, task } = await lockedReview(transaction, fence);
         await testHooks.afterFinalizeLock?.(review.id);
         if (
           review.status !== "finalizing" ||
@@ -427,18 +438,6 @@ export function createReviewRepositories(
         ) {
           throw new DevelopmentTransitionError("Review cannot finalize in the current state");
         }
-        const [attempt] = await transaction
-          .select()
-          .from(developmentAttempts)
-          .where(eq(developmentAttempts.id, review.implementerAttemptId))
-          .limit(1)
-          .for("update");
-        const [task] = await transaction
-          .select()
-          .from(developmentTasks)
-          .where(eq(developmentTasks.id, review.taskId))
-          .limit(1)
-          .for("update");
         if (
           task?.status !== "candidate_ready" ||
           task.authorityInvalidatedAt ||
@@ -561,7 +560,7 @@ export function createReviewRepositories(
       const fence = fenceSchema.parse(input);
       const result = safeReviewResultSchema.parse(input.result);
       return database.transaction(async (transaction) => {
-        const { databaseNow, review } = await lockedReview(transaction, fence);
+        const { databaseNow, review, task } = await lockedReview(transaction, fence);
         if (review.status === "finalizing") {
           if (review.decision === result.decision && JSON.stringify(review.findings) === JSON.stringify(result.findings)) {
             return review;
@@ -571,12 +570,6 @@ export function createReviewRepositories(
         if (review.status !== "reviewing" || !review.contextDigest) {
           throw new DevelopmentTransitionError("Reviewer proposal is not allowed in the current state");
         }
-        const [task] = await transaction
-          .select()
-          .from(developmentTasks)
-          .where(eq(developmentTasks.id, review.taskId))
-          .limit(1)
-          .for("update");
         const criterionIds = new Set(
           developmentAcceptanceCriteriaSchema.parse(task!.acceptanceCriteria).map((criterion) => criterion.id)
         );
@@ -614,13 +607,7 @@ export function createReviewRepositories(
       const fence = fenceSchema.parse(input);
       const failureClass = shortText.parse(input.failureClass);
       return database.transaction(async (transaction) => {
-        const { databaseNow, review } = await lockedReview(transaction, fence);
-        const [attempt] = await transaction
-          .select()
-          .from(developmentAttempts)
-          .where(eq(developmentAttempts.id, review.implementerAttemptId))
-          .limit(1)
-          .for("update");
+        const { attempt, databaseNow, review } = await lockedReview(transaction, fence);
         if (
           !attempt?.fixIteration ||
           review.decision ||
@@ -670,16 +657,33 @@ export function createReviewRepositories(
         runnerId: shortText
       }).strict().parse(input);
       return database.transaction(async (transaction) => {
-        const [review] = await transaction
-          .select()
+        const [candidate] = await transaction
+          .select({ id: developmentReviews.id, taskId: developmentReviews.taskId, attemptId: developmentReviews.implementerAttemptId })
           .from(developmentReviews)
-          .where(
-            sql`${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`
-          )
+          .where(sql`${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`)
           .orderBy(asc(developmentReviews.leaseExpiresAt), asc(developmentReviews.id))
+          .limit(1);
+        if (!candidate) return undefined;
+        const [task] = await transaction
+          .select()
+          .from(developmentTasks)
+          .where(eq(developmentTasks.id, candidate.taskId))
           .limit(1)
           .for("update", { skipLocked: true });
-        if (!review) return undefined;
+        if (!task || task.status !== "candidate_ready") return undefined;
+        await transaction
+          .select()
+          .from(developmentAttempts)
+          .where(eq(developmentAttempts.id, candidate.attemptId))
+          .limit(1)
+          .for("update");
+        const review = (await transaction
+          .select()
+          .from(developmentReviews)
+          .where(sql`${developmentReviews.id} = ${candidate.id}
+            and ${developmentReviews.status} in ('preparing', 'reviewing', 'finalizing', 'interrupted')`)
+          .limit(1)
+          .for("update"))[0]!;
         await testHooks.afterReclaimLock?.(review.id);
         const databaseNow = await freshDatabaseTime(transaction);
         if (review.leaseExpiresAt > databaseNow) return undefined;

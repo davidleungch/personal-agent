@@ -120,10 +120,22 @@ export function createDevelopmentRepositories(
     runnerId: shortText
   });
 
+  // Canonical overlapping-row order: task -> attempt -> review.
   async function lockedAttempt(
     transaction: Parameters<Parameters<Database["transaction"]>[0]>[0],
     input: z.infer<typeof fenceSchema>
   ) {
+    const [identity] = await transaction
+      .select({ taskId: developmentAttempts.taskId })
+      .from(developmentAttempts)
+      .where(eq(developmentAttempts.id, input.attemptId))
+      .limit(1);
+    const [task] = await transaction
+      .select()
+      .from(developmentTasks)
+      .where(eq(developmentTasks.id, identity!.taskId))
+      .limit(1)
+      .for("update");
     const [attempt] = await transaction
       .select()
       .from(developmentAttempts)
@@ -141,7 +153,7 @@ export function createDevelopmentRepositories(
     ) {
       throw new DevelopmentLeaseError("Development attempt lease is not current");
     }
-    return { attempt, databaseNow };
+    return { attempt, databaseNow, task };
   }
 
   async function insertEvent(
@@ -262,20 +274,25 @@ export function createDevelopmentRepositories(
     }) => {
       const attemptId = uuidSchema.parse(input.attemptId);
       return database.transaction(async (transaction) => {
+        const [identity] = await transaction
+          .select({ taskId: developmentAttempts.taskId })
+          .from(developmentAttempts)
+          .where(eq(developmentAttempts.id, attemptId))
+          .limit(1);
+        const [task] = identity
+          ? await transaction
+              .select()
+              .from(developmentTasks)
+              .where(eq(developmentTasks.id, identity.taskId))
+              .limit(1)
+              .for("update")
+          : [];
         const [attempt] = await transaction
           .select()
           .from(developmentAttempts)
           .where(eq(developmentAttempts.id, attemptId))
           .limit(1)
           .for("update");
-        const [task] = attempt
-          ? await transaction
-              .select()
-              .from(developmentTasks)
-              .where(eq(developmentTasks.id, attempt.taskId))
-              .limit(1)
-              .for("update")
-          : [];
         if (
           attempt?.status !== "succeeded" ||
           task?.status !== "candidate_ready"
@@ -568,16 +585,27 @@ export function createDevelopmentRepositories(
         })
         .parse(input);
       return database.transaction(async (transaction) => {
-        const [attempt] = await transaction
-          .select()
+        const [candidate] = await transaction
+          .select({ id: developmentAttempts.id, taskId: developmentAttempts.taskId })
           .from(developmentAttempts)
-          .where(
-            sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`
-          )
+          .where(sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
           .orderBy(asc(developmentAttempts.leaseExpiresAt), asc(developmentAttempts.id))
+          .limit(1);
+        if (!candidate) return undefined;
+        const [task] = await transaction
+          .select()
+          .from(developmentTasks)
+          .where(eq(developmentTasks.id, candidate.taskId))
           .limit(1)
           .for("update", { skipLocked: true });
-        if (!attempt) return undefined;
+        if (!task || !["preparing", "implementing", "testing"].includes(task.status)) return undefined;
+        const attempt = (await transaction
+          .select()
+          .from(developmentAttempts)
+          .where(sql`${developmentAttempts.id} = ${candidate.id}
+            and ${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`)
+          .limit(1)
+          .for("update"))[0]!;
         const databaseNow = await freshDatabaseTime(transaction);
         if (!attempt.leaseExpiresAt || attempt.leaseExpiresAt > databaseNow) return undefined;
 

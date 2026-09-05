@@ -35,6 +35,12 @@ function blockingFingerprints(findings: readonly DevelopmentReviewFinding[]): Se
   );
 }
 
+function blockingFindingCount(findings: readonly DevelopmentReviewFinding[]): number {
+  return findings.filter(
+    (finding) => finding.severity === "critical" || finding.severity === "high"
+  ).length;
+}
+
 function nonConvergenceReason(
   history: ReadonlyArray<{ findings: DevelopmentReviewFinding[] }>
 ): DevelopmentNeedsHumanReason | undefined {
@@ -47,7 +53,9 @@ function nonConvergenceReason(
   if ([...currentBlocking].some((value) => previousBlocking.has(value))) {
     return "non_convergence";
   }
-  if (currentBlocking.size > previousBlocking.size) return "non_convergence";
+  if (blockingFindingCount(current.findings) > blockingFindingCount(previous.findings)) {
+    return "non_convergence";
+  }
   const older = new Set(
     history.slice(0, -2).flatMap((review) => [...blockingFingerprints(review.findings)])
   );
@@ -157,16 +165,21 @@ export function createFixLoopRepositories(database: Database) {
           sql`select clock_timestamp() as "databaseNow"`
         );
         const databaseNow = z.coerce.date().parse(clock.rows[0]?.databaseNow);
+        const [attemptIdentity] = await transaction
+          .select({ id: developmentReviews.implementerAttemptId })
+          .from(developmentReviews)
+          .where(eq(developmentReviews.id, reviewId))
+          .limit(1);
+        const [attempt] = await transaction
+          .select()
+          .from(developmentAttempts)
+          .where(eq(developmentAttempts.id, attemptIdentity!.id))
+          .limit(1)
+          .for("update");
         const [review] = await transaction
           .select()
           .from(developmentReviews)
           .where(eq(developmentReviews.id, reviewId))
-          .limit(1)
-          .for("update");
-        const [attempt] = await transaction
-          .select()
-          .from(developmentAttempts)
-          .where(eq(developmentAttempts.id, review!.implementerAttemptId))
           .limit(1)
           .for("update");
         const [latest] = await transaction
