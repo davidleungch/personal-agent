@@ -857,7 +857,7 @@ describe("Phase 2B independent Reviewer coordinator", () => {
       review: { ...baseReview, budget, usage: emptyDevelopmentUsage() },
       task: { acceptanceCriteria: criteria, approvedSpec: "spec", baseCommit: baseReview.baseCommit, title: "task" }
     };
-    function mocked(reclaimed: unknown, durableResult: unknown = durable, digest = baseReview.contextDigest) {
+    function mocked(reclaimed: unknown, durableResult: unknown = durable, digest = baseReview.contextDigest, attemptResult?: unknown) {
       const persistence = {
         completeReviewFailure: vi.fn(async () => ({ status: "failed" })),
         getReview: vi.fn(async () => reclaimed),
@@ -873,7 +873,9 @@ describe("Phase 2B independent Reviewer coordinator", () => {
           compile: vi.fn(async () => ({ digest })),
           validateFindings: vi.fn(async () => undefined)
         },
-        developmentPersistence: {},
+        developmentPersistence: attemptResult === undefined
+          ? {}
+          : { getDevelopmentAttempt: vi.fn(async () => attemptResult) },
         git: {
           ensureReviewRetentionRef: vi.fn(async () => ({
             commit: baseReview.candidateCommit,
@@ -899,6 +901,15 @@ describe("Phase 2B independent Reviewer coordinator", () => {
 
     const interrupted = mocked(baseReview);
     await expect(interrupted.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toEqual({ status: "failed" });
+    const interruptedClean = mocked({ ...baseReview, cleanupStatus: "succeeded" });
+    await expect(interruptedClean.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toEqual({ status: "failed" });
+    const invalidatedFix = mocked(
+      { ...baseReview, authorityInvalidated: true },
+      durable,
+      baseReview.contextDigest,
+      { fixIteration: 1 }
+    );
+    await expect(invalidatedFix.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toEqual({ status: "failed" });
     expect(interrupted.persistence.completeReviewFailure).toHaveBeenCalled();
 
     const finalizing = { ...baseReview, decision: "APPROVE", failureClass: null, status: "finalizing" };

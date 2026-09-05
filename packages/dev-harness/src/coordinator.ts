@@ -525,16 +525,13 @@ export class DevelopmentCoordinator {
         attempt.baseCommit
       );
     } catch {
-      if (attempt.fixIteration) {
-        return this.dependencies.persistence.markDevelopmentNeedsHuman({
-          attemptId: attempt.id,
-          failureClass: "candidate_binding_invalid",
-          leaseGeneration: attempt.leaseGeneration,
-          reason: "candidate_binding_invalid",
-          runnerId: this.dependencies.runnerId
-        });
-      }
-      throw new Error("Interrupted candidate integrity could not be verified");
+      return this.dependencies.persistence.markDevelopmentNeedsHuman({
+        attemptId: attempt.id,
+        failureClass: "candidate_binding_invalid",
+        leaseGeneration: attempt.leaseGeneration,
+        reason: "candidate_binding_invalid",
+        runnerId: this.dependencies.runnerId
+      });
     }
     if (candidate) {
       // A captured candidate is durable authority; disposable worker resources are not.

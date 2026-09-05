@@ -282,6 +282,10 @@ describe("Phase 2C bounded coordinator", () => {
       attempt: { id: fixed!.attempt.id },
       review: { id: rejected.id }
     });
+    await expect(system.developmentPersistence.getConsumedFixAttemptInput(fixed!.attempt.id)).resolves.toMatchObject({
+      attempt: { id: fixed!.attempt.id },
+      sourceReview: { id: rejected.id }
+    });
     await expect(system.reviews.getCurrentAuthoritativeReview(task.id, firstCandidate)).resolves.toBeUndefined();
 
     harness.reviewInfrastructureFailures = 2;
@@ -425,6 +429,18 @@ describe("Phase 2C bounded coordinator", () => {
       runFix: async () => ({ task: { status: "needs_human" } }),
       runReview: async () => { throw new Error("must not review"); }
     })).resolves.toMatchObject({ task: { status: "needs_human" } });
+    let fixCalls = 0;
+    await expect(runBoundedFixLoop({
+      reconcile: async () => ({ task: { id: "task", status: "fix_required" } }),
+      runFix: async () => { fixCalls += 1; return { task: { status: "preparing" } }; },
+      runReview: async () => undefined
+    })).rejects.toThrow("loop bound");
+    await expect(runBoundedFixLoop({
+      reconcile: async () => ({ task: { id: "task", status: "fix_required" } }),
+      runFix: async () => ({ task: {} }),
+      runReview: async () => undefined
+    })).rejects.toThrow("loop bound");
+    expect(fixCalls).toBe(3);
   });
 
   it("escalates a non-infrastructure fixed-candidate Reviewer failure", async () => {
@@ -442,16 +458,33 @@ describe("Phase 2C bounded coordinator", () => {
     await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
     await system.fix.reconcileOne();
     await system.development.runOne(implementationPolicy, { fixOnly: true, taskId: task.id });
-    vi.spyOn(system.reviewerCompiler, "compile").mockRejectedValueOnce(
-      new Error("context unavailable")
+    vi.spyOn(system.reviews, "finalizeReview").mockRejectedValueOnce(
+      new Error("finalization unavailable")
     );
     await expect(system.reviewer.runOne(reviewPolicy, { taskId: task.id })).rejects.toThrow(
-      "context unavailable"
+      "finalization unavailable"
     );
     await expect(system.developmentPersistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
       needsHumanReason: "reviewer_failure",
       status: "needs_human"
     });
+
+    const secondFixture = await repositoryFixture();
+    const secondHarness = new ScriptedHarness();
+    secondHarness.failFirstFix = false;
+    const secondSystem = setup(secondFixture, secondHarness);
+    const secondTask = await secondSystem.development.createApprovedTask({
+      acceptanceCriteria: criteria,
+      approvedSpec: "Fail closed on an interrupted fixed review.",
+      baseReference: secondFixture.base,
+      title: "Interrupted fixed review"
+    });
+    await secondSystem.development.runOne(implementationPolicy, { taskId: secondTask.id });
+    await secondSystem.reviewer.runOne(reviewPolicy, { taskId: secondTask.id });
+    await secondSystem.fix.reconcileOne();
+    await secondSystem.development.runOne(implementationPolicy, { fixOnly: true, taskId: secondTask.id });
+    vi.spyOn(secondSystem.reviewerCompiler, "compile").mockRejectedValueOnce(new Error("context unavailable"));
+    await expect(secondSystem.reviewer.runOne(reviewPolicy, { taskId: secondTask.id })).rejects.toThrow("context unavailable");
   });
 
   it("escalates after two failed fresh Reviewer infrastructure retries", async () => {
@@ -627,9 +660,10 @@ describe("Phase 2C bounded coordinator", () => {
       "update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1",
       [claimed.attempt.id]
     );
+    vi.spyOn(fixture.git, "verifyCandidateRef").mockRejectedValueOnce(new Error("wrong parent"));
     await expect(system.development.recoverOne(30_000)).resolves.toMatchObject({
       attempt: { candidateCommit: null, fixIteration: 1 },
-      task: { needsHumanReason: "durable_integrity_failure", status: "needs_human" }
+      task: { needsHumanReason: "candidate_binding_invalid", status: "needs_human" }
     });
     expect(harness.inputs.filter((input) => input.context.fix)).toHaveLength(0);
   });

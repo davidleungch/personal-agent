@@ -81,5 +81,4 @@ export async function runBoundedFixLoop(input: {
     }
     await input.runReview(reconciled.task.id);
   }
-  throw new Error("Phase 2C deterministic loop bound was exceeded");
 }
