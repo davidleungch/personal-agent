@@ -374,7 +374,6 @@ export function createReviewRepositories(
       return database.transaction(async (transaction) => {
         const { attempt, databaseNow, review, task } = await lockedReview(transaction, fence);
         if (
-          review.cleanupStatus !== "succeeded" ||
           !(
             review.status === "interrupted" ||
             (review.status === "finalizing" && review.failureClass)

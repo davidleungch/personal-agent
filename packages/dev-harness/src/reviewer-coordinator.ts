@@ -101,9 +101,6 @@ export class ReviewerCoordinator {
     const durable = await this.dependencies.persistence.getReviewContextInput(reviewId);
     if (!durable) throw new Error("Durable Reviewer context input disappeared");
     const criteria = developmentAcceptanceCriteriaSchema.parse(durable.task.acceptanceCriteria);
-    if (!durable.attemptEvents.some((event) => event.kind === "teardown" && event.status === "success")) {
-      throw new Error("Reviewer context is missing successful Phase 2A cleanup evidence");
-    }
     return this.dependencies.contextCompiler.compile({
       acceptanceCriteria: criteria,
       baseCommit: durable.review.baseCommit,
@@ -436,6 +433,7 @@ export class ReviewerCoordinator {
         });
         await this.dependencies.persistence.completeReviewFailure({
           ...fence,
+          ...(attempt.fixIteration ? { needsHumanReason: "reviewer_failure" } : {}),
           now: new Date(),
           safeSummary: "Independent Reviewer finalization failed closed"
         });
@@ -455,94 +453,68 @@ export class ReviewerCoordinator {
       reviewId: review.id,
       runnerId: this.dependencies.runnerId
     };
-    const workspace = this.dependencies.sandboxManager.identify({
-      sandboxId: review.sandboxId,
-      workspacePath: this.dependencies.git.workspacePath(review.id)
-    });
-    if (review.authorityInvalidated) {
-      await this.dependencies.persistence.recordReviewFailure({
-        ...fence,
-        failureClass: "authority_invalidated",
-        now: new Date()
+    // Recovery never reuses or destroys an expired worker's external resources.
+    // An interrupted review is ambiguous; fail closed instead of starting Pi again.
+    const attempt = "getDevelopmentAttempt" in this.dependencies.developmentPersistence
+      ? await this.dependencies.developmentPersistence.getDevelopmentAttempt(review.implementerAttemptId)
+      : undefined;
+    if (!attempt?.fixIteration) {
+      const workspace = this.dependencies.sandboxManager.identify({
+        sandboxId: review.sandboxId,
+        workspacePath: this.dependencies.git.workspacePath(review.id)
       });
-      if (review.cleanupStatus !== "succeeded") {
-        await this.cleanup(fence, workspace);
-      }
-      return this.dependencies.persistence.completeReviewFailure({
-        ...fence,
-        now: new Date(),
-        safeSummary: "Reviewer authority was invalidated; cleanup completed without an authoritative decision"
-      });
-    }
-
-    const recoverableProposal =
-      review.status === "finalizing" &&
-      review.decision &&
-      review.contextDigest &&
-      !review.failureClass;
-    if (recoverableProposal) {
-      try {
-        const retained = await this.dependencies.git.ensureReviewRetentionRef(
-          review.id,
-          review.candidateCommit
-        );
-        if (retained.ref !== review.retentionRef) {
-          throw new Error("Reviewer retention identity changed");
-        }
-      } catch {
+      if (review.authorityInvalidated) {
         await this.dependencies.persistence.recordReviewFailure({
           ...fence,
-          failureClass: "candidate_unavailable",
+          failureClass: "authority_invalidated",
           now: new Date()
         });
-      }
-    }
-    if (review.cleanupStatus !== "succeeded") {
-      await this.cleanup(fence, workspace);
-    }
-
-    if (review.status === "interrupted" && !review.decision) {
-      const durable = await this.dependencies.persistence.getReviewContextInput(review.id);
-      if (durable?.attempt.fixIteration && review.infrastructureRetryCount < 2) {
-        await this.dependencies.persistence.prepareReviewInfrastructureRetry({
+        if (review.cleanupStatus !== "succeeded") await this.cleanup(fence, workspace);
+        return this.dependencies.persistence.completeReviewFailure({
           ...fence,
-          failureClass: review.failureClass!,
-          leaseDurationMs
+          now: new Date(),
+          safeSummary: "Reviewer authority was invalidated; cleanup completed without an authoritative decision"
         });
-        const contextPolicy = developmentReviewerContextPolicySchema.parse(review.contextPolicy);
-        return this.runOne({
-          budget: developmentBudgetSchema.parse(review.budget),
-          forbiddenPaths: contextPolicy.forbiddenPaths,
-          leaseDurationMs,
-          modelProfile: modelProfileSchema.parse(review.modelProfile),
-          readablePaths: contextPolicy.readablePaths,
-          relevantPaths: contextPolicy.relevantPaths
-        }, { taskId: review.taskId });
       }
+      if (review.status === "finalizing" && review.decision && review.contextDigest && !review.failureClass) {
+        try {
+          const retained = await this.dependencies.git.ensureReviewRetentionRef(review.id, review.candidateCommit);
+          if (retained.ref !== review.retentionRef) throw new Error("Reviewer retention identity changed");
+          if (review.cleanupStatus !== "succeeded") await this.cleanup(fence, workspace);
+          return this.dependencies.persistence.finalizeReview({
+            ...fence,
+            contextDigest: review.contextDigest,
+            now: new Date()
+          });
+        } catch {
+          await this.dependencies.persistence.recordReviewFailure({
+            ...fence,
+            failureClass: "candidate_unavailable",
+            now: new Date()
+          });
+        }
+      }
+      if (review.cleanupStatus !== "succeeded") await this.cleanup(fence, workspace);
       return this.dependencies.persistence.completeReviewFailure({
         ...fence,
-        ...(durable?.attempt.fixIteration
-          ? { needsHumanReason: "infrastructure_retry_exhausted" }
-          : {}),
         now: new Date(),
-        safeSummary: "Interrupted independent Reviewer was reconstructed without session authority"
+        safeSummary: "Interrupted independent Reviewer was reconstructed without Pi session state and failed closed"
       });
     }
-
-    if (recoverableProposal) {
-      const current = await this.dependencies.persistence.getReview(review.id);
-      if (!current?.failureClass) {
-        return this.dependencies.persistence.finalizeReview({
-          ...fence,
-          contextDigest: review.contextDigest!,
-          now: new Date()
-        });
-      }
-    }
+    await this.dependencies.persistence.recordReviewFailure({
+      ...fence,
+      failureClass: review.authorityInvalidated ? "authority_invalidated" : "execution_interrupted",
+      now: new Date()
+    });
     return this.dependencies.persistence.completeReviewFailure({
       ...fence,
+      ...(attempt?.fixIteration && !review.authorityInvalidated
+        ? { needsHumanReason: "reviewer_failure" }
+        : {}),
       now: new Date(),
-      safeSummary: "Interrupted independent Reviewer was reconstructed without Pi session state and failed closed"
+      safeSummary: review.authorityInvalidated
+        ? "Reviewer authority was invalidated; recovery stopped without external cleanup"
+        : "Interrupted independent Reviewer failed closed without session authority"
     });
   }
 }

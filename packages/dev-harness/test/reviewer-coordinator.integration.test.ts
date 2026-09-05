@@ -326,16 +326,16 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     const budgetReview = setup({ fixture: budgetFixture, harness: budgetHarness, runnerId: "budget-failure" });
     await expect(budgetReview.coordinator.runOne({ ...policy, budget: { ...budget, maxWallClockMs: 1 } })).rejects.toBeDefined();
 
-    for (const missing of ["test", "teardown"] as const) {
-      const fixture = await repositoryFixture();
-      await candidateReady(fixture, {
-        testEvidence: missing !== "test",
-        teardownEvidence: missing !== "teardown"
-      });
-      const review = setup({ fixture, runnerId: `missing-${missing}` });
-      await expect(review.coordinator.runOne(policy)).rejects.toThrow(/missing/i);
-      expect(review.harness.executions).toHaveLength(0);
-    }
+    const missingTest = await repositoryFixture();
+    await candidateReady(missingTest, { testEvidence: false });
+    const missingTestReview = setup({ fixture: missingTest, runnerId: "missing-test" });
+    await expect(missingTestReview.coordinator.runOne(policy)).rejects.toThrow(/missing/i);
+    expect(missingTestReview.harness.executions).toHaveLength(0);
+
+    const missingTeardown = await repositoryFixture();
+    await candidateReady(missingTeardown, { teardownEvidence: false });
+    const missingTeardownReview = setup({ fixture: missingTeardown, runnerId: "missing-teardown" });
+    await expect(missingTeardownReview.coordinator.runOne(policy)).resolves.toMatchObject({ status: "succeeded" });
   });
 
   it("detects approved-command candidate mutation and a changed trusted candidate ref", async () => {

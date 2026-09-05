@@ -118,6 +118,17 @@ export function createFixLoopRepositories(database: Database) {
       return { attempt: row.consumer, review: row.review };
     },
 
+    markStrandedFixRequired: async () => {
+      return database.transaction(async (transaction) => {
+        const [updated] = await transaction
+          .update(developmentTasks)
+          .set({ needsHumanReason: "durable_integrity_failure", status: "needs_human", updatedAt: new Date() })
+          .where(eq(developmentTasks.status, "fix_required"))
+          .returning();
+        return updated ? { task: updated } : undefined;
+      });
+    },
+
     getReconciledReview: async (taskId: string) => {
       const [task] = await database
         .select()

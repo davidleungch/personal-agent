@@ -18,7 +18,10 @@ export class FixLoopCoordinator {
 
   async reconcileOne() {
     const current = await this.dependencies.persistence.findCurrentReviewForReconciliation();
-    if (!current) return undefined;
+    if (!current) {
+      // A process can die after reconciliation and before the fix starts.
+      return this.dependencies.persistence.markStrandedFixRequired();
+    }
     const candidate = await this.dependencies.git.verifyCandidateRef(
       current.attempt.id,
       current.attempt.baseCommit,
@@ -71,7 +74,11 @@ export async function runBoundedFixLoop(input: {
     if (reconciled.task.status !== "fix_required") {
       throw new Error("Phase 2C reconciliation produced an invalid next state");
     }
-    await input.runFix(reconciled.task.id);
+    if (step === 3) throw new Error("Phase 2C deterministic loop bound was exceeded");
+    const fixed = await input.runFix(reconciled.task.id) as { task?: { status?: string } } | undefined;
+    if (fixed?.task && ["approved_candidate", "needs_human", "blocked"].includes(fixed.task.status ?? "")) {
+      return fixed;
+    }
     await input.runReview(reconciled.task.id);
   }
   throw new Error("Phase 2C deterministic loop bound was exceeded");

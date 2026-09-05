@@ -518,16 +518,27 @@ export class DevelopmentCoordinator {
       runnerId: this.dependencies.runnerId
     });
     if (!attempt) return undefined;
-    const candidate = await this.dependencies.git.verifyCandidateRef(
-      attempt.id,
-      attempt.baseCommit
-    );
-    const workspace = this.dependencies.sandboxManager.identify({
-      sandboxId: attempt.sandboxId,
-      workspacePath: this.dependencies.git.workspacePath(attempt.id)
-    });
+    let candidate;
+    try {
+      candidate = await this.dependencies.git.verifyCandidateRef(
+        attempt.id,
+        attempt.baseCommit
+      );
+    } catch {
+      if (attempt.fixIteration) {
+        return this.dependencies.persistence.markDevelopmentNeedsHuman({
+          attemptId: attempt.id,
+          failureClass: "candidate_binding_invalid",
+          leaseGeneration: attempt.leaseGeneration,
+          reason: "candidate_binding_invalid",
+          runnerId: this.dependencies.runnerId
+        });
+      }
+      throw new Error("Interrupted candidate integrity could not be verified");
+    }
     if (candidate) {
-      await this.dependencies.persistence.reconcileDevelopmentCandidate({
+      // A captured candidate is durable authority; disposable worker resources are not.
+      return this.dependencies.persistence.reconcileDevelopmentCandidate({
         attemptId: attempt.id,
         candidateCommit: candidate.commit,
         candidateRef: candidate.ref,
@@ -537,56 +548,14 @@ export class DevelopmentCoordinator {
         safeSummary: "Candidate reconciled from the trusted attempt ref after interruption"
       });
     }
-    await this.dependencies.sandboxManager.teardown(workspace);
-    await this.dependencies.git.removeWorktree(workspace.path);
-    await this.dependencies.persistence.appendDevelopmentAttemptEvent({
-      attemptId: attempt.id,
-      kind: "teardown",
-      leaseGeneration: attempt.leaseGeneration,
-      now: new Date(),
-      runnerId: this.dependencies.runnerId,
-      safeMetadata: { recovery: true, sandbox_id: attempt.sandboxId },
-      status: "success"
-    });
-    if (!candidate && attempt.fixIteration) {
-      const durable = await this.dependencies.persistence.getConsumedFixAttemptInput(attempt.id);
-      if (!durable) {
-        return this.dependencies.persistence.markDevelopmentNeedsHuman({
-          attemptId: attempt.id,
-          failureClass: "context_unavailable",
-          leaseGeneration: attempt.leaseGeneration,
-          reason: "context_unavailable",
-          runnerId: this.dependencies.runnerId
-        });
-      }
-      if (attempt.infrastructureRetryCount >= 2) {
-        return this.dependencies.persistence.markDevelopmentNeedsHuman({
-          attemptId: attempt.id,
-          failureClass: "infrastructure_retry_exhausted",
-          leaseGeneration: attempt.leaseGeneration,
-          reason: "infrastructure_retry_exhausted",
-          runnerId: this.dependencies.runnerId
-        });
-      }
-      const retried = await this.dependencies.persistence.prepareDevelopmentInfrastructureRetry({
+    if (attempt.fixIteration) {
+      return this.dependencies.persistence.markDevelopmentNeedsHuman({
         attemptId: attempt.id,
-        failureClass: "lease_expired",
-        leaseDurationMs,
+        failureClass: "execution_interrupted",
         leaseGeneration: attempt.leaseGeneration,
+        reason: "durable_integrity_failure",
         runnerId: this.dependencies.runnerId
       });
-      const contextPolicy = developmentImplementerContextPolicySchema.parse(attempt.contextPolicy);
-      return this.executeWithRetries(
-        { ...durable, attempt: retried.attempt, task: retried.task },
-        {
-          allowedPaths: contextPolicy.allowedPaths,
-          budget: developmentBudgetSchema.parse(attempt.budget),
-          forbiddenPaths: contextPolicy.forbiddenPaths,
-          leaseDurationMs,
-          modelProfile: modelProfileSchema.parse(attempt.modelProfile),
-          relevantPaths: contextPolicy.relevantPaths
-        }
-      );
     }
     return { attempt, candidate };
   }

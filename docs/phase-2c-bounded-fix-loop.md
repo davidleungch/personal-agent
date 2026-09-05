@@ -6,6 +6,29 @@ Phase 2C is authorized for design and implementation only after Phase 2B is comp
 
 Phase 2C does not authorize merge, push, deployment, self-generated tasks, specification changes, or Phase 3 self-improvement.
 
+## Human-approved v1 recovery refinement
+
+This is a human-approved scope refinement from **automatic restart-safe continuation**
+to **restart-safe authority preservation + deterministic fail-closed escalation**.
+Candidate E was rejected under the superseded stronger recovery contract; that
+review is not being reinterpreted. Phase 2C v1 requires bounded autonomous work
+only while an execution has an active lease. It does not require automatic
+continuation after arbitrary process or machine crashes, multi-worker takeover,
+or ambiguous external-resource ownership.
+
+When an interrupted `preparing`, `implementing`, `testing`, `fix_required`, or
+`interrupted` execution cannot be completed by a cheap deterministic
+reconciliation, recovery must transition to `needs_human`. It must never return
+`undefined` while leaving a task active. A valid captured candidate remains
+reviewable from PostgreSQL plus its trusted Git ref; Implementer workspace and
+container teardown are operational cleanup debt, not candidate authority.
+
+Recovery does not reuse or destructively clean up an expired worker's workspace
+or container. It performs no autonomous fix continuation after lease loss.
+Full autonomous crash recovery, generation-fenced external resources, and
+exactly-once external cleanup are explicitly deferred to a later authorized
+hardening phase.
+
 ## Objective
 
 Phase 2C allows the system to autonomously repair a candidate that received `REQUEST_CHANGES` from an independent Phase 2B Reviewer.
@@ -142,13 +165,11 @@ Each review uses a fresh independent Reviewer session.
 
 A Reviewer session must never be reused as an Implementer session.
 
-If a fix attempt process/session crashes before the attempt is durably complete:
-
-* reconstruct authority and context from PostgreSQL, Git, approved repository authority, and deterministic evidence;
-* do not depend on the old session;
-* start a fresh session only if the durable state machine authorizes continuation or retry.
-
-Session state is optimization only, never authority.
+If a fix attempt process/session crashes before the attempt is durably complete,
+recovery inspects PostgreSQL and Git but does not reconstruct process-local
+orchestration position. If no safely captured candidate exists, it marks the
+fix attempt `needs_human`. It never starts a fresh fix session solely because a
+lease expired. Session state is optimization only, never authority.
 
 ---
 
@@ -442,9 +463,11 @@ Phase 2C should not be considered complete until tests prove at least:
 13. same review cannot be consumed twice;
 14. infrastructure retry does not incorrectly reset or bypass the fix budget;
 15. repeated/non-convergent findings escalate;
-16. Reviewer and Implementer sessions remain independent;
-17. no Phase 2D merge/deploy capability exists;
-18. Phase 1, Phase 2A, and Phase 2B regression suites remain green.
+16. ambiguous interrupted fix/reviewer execution reaches `needs_human` without
+    autonomous continuation;
+17. Reviewer and Implementer sessions remain independent;
+18. no Phase 2D merge/deploy capability exists;
+19. Phase 1, Phase 2A, and Phase 2B regression suites remain green.
 
 ---
 

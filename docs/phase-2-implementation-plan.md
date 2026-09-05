@@ -818,7 +818,11 @@ must not be marked complete by its Implementer session.
 
 ## Contract
 
-Phase 2C adds the bounded loop:
+Phase 2C adds the bounded loop. Its human-approved v1 recovery refinement is
+**restart-safe authority preservation + deterministic fail-closed escalation**,
+not automatic restart-safe continuation. Full autonomous crash recovery and
+external-resource fencing/cleanup are deferred to a later explicitly
+authorized hardening phase.
 
 ```text
 implement
@@ -849,9 +853,11 @@ and non-actionable review conflict enter durable `BLOCKED` or `NEEDS_HUMAN`
 state. Limits are immutable to the model and cannot reset between sessions.
 
 Phase 2C includes neither merge nor deployment. Acceptance proves finite loops,
-durable attempt/review history, candidate-specific reviews, correct budget
-accounting across restarts, deterministic terminal `BLOCKED`, and no long-lived
-session dependency. Stop for separate Phase 2D authorization.
+durable attempt/review history, candidate-specific reviews, bounded budget
+accounting during owned execution, deterministic `needs_human` escalation for
+ambiguous interrupted state, and no long-lived session dependency. It does not
+require automatic process/machine restart continuation, workspace/container
+reuse, or exactly-once external cleanup. Stop for separate Phase 2D authorization.
 
 # Phase 2D — Auto-Merge and Deploy
 

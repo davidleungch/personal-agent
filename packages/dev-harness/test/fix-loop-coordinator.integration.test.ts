@@ -301,6 +301,26 @@ describe("Phase 2C bounded coordinator", () => {
     )).toBe(true);
   });
 
+  it("escalates a fix_required task left behind before fix execution", async () => {
+    const fixture = await repositoryFixture();
+    const harness = new ScriptedHarness();
+    harness.failFirstFix = false;
+    const system = setup(fixture, harness);
+    const task = await system.development.createApprovedTask({
+      acceptanceCriteria: criteria,
+      approvedSpec: "Escalate an abandoned fix.",
+      baseReference: fixture.base,
+      title: "Abandoned fix"
+    });
+    await system.development.runOne(implementationPolicy, { taskId: task.id });
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    await expect(system.fix.reconcileOne()).resolves.toMatchObject({ task: { status: "fix_required" } });
+    await expect(system.fix.reconcileOne()).resolves.toMatchObject({
+      task: { status: "needs_human", needsHumanReason: "durable_integrity_failure" }
+    });
+    expect(harness.inputs.filter((input) => input.context.fix)).toHaveLength(0);
+  });
+
   it("fails reconciliation closed for unavailable Git authority and detects equivalent trees", async () => {
     const current = {
       attempt: {
@@ -400,6 +420,11 @@ describe("Phase 2C bounded coordinator", () => {
       runFix: async () => undefined,
       runReview: async () => undefined
     })).rejects.toThrow("loop bound");
+    await expect(runBoundedFixLoop({
+      reconcile: async () => ({ task: { id: "task", status: "fix_required" } }),
+      runFix: async () => ({ task: { status: "needs_human" } }),
+      runReview: async () => { throw new Error("must not review"); }
+    })).resolves.toMatchObject({ task: { status: "needs_human" } });
   });
 
   it("escalates a non-infrastructure fixed-candidate Reviewer failure", async () => {
@@ -523,7 +548,7 @@ describe("Phase 2C bounded coordinator", () => {
     );
     await expect(system.reviewer.recoverOne(30_000)).resolves.toMatchObject({ status: "failed" });
     await expect(system.developmentPersistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
-      needsHumanReason: "infrastructure_retry_exhausted",
+      needsHumanReason: "reviewer_failure",
       status: "needs_human"
     });
   });
@@ -560,16 +585,15 @@ describe("Phase 2C bounded coordinator", () => {
       [review.id]
     );
     await expect(system.reviewer.recoverOne(30_000)).resolves.toMatchObject({
-      decision: "APPROVE",
-      infrastructureRetryCount: 1,
-      status: "succeeded"
+      status: "failed"
     });
     const recoveredInputs = harness.inputs.filter(
       (input) => input.role === "reviewer" && input.attemptId === review.id
     );
-    expect(recoveredInputs).toHaveLength(1);
-    await expect(system.fix.reconcileOne()).resolves.toMatchObject({
-      task: { status: "approved_candidate" }
+    expect(recoveredInputs).toHaveLength(0);
+    await expect(system.developmentPersistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
+      needsHumanReason: "reviewer_failure",
+      status: "needs_human"
     });
   });
 
@@ -604,12 +628,10 @@ describe("Phase 2C bounded coordinator", () => {
       [claimed.attempt.id]
     );
     await expect(system.development.recoverOne(30_000)).resolves.toMatchObject({
-      attempt: { candidateCommit: expect.stringMatching(/^[0-9a-f]{40}$/), fixIteration: 1 },
-      task: { status: "candidate_ready" }
+      attempt: { candidateCommit: null, fixIteration: 1 },
+      task: { needsHumanReason: "durable_integrity_failure", status: "needs_human" }
     });
-    expect(harness.inputs.at(-1)?.context.fix).toMatchObject({
-      sourceReviewId: claimed.sourceReview.id
-    });
+    expect(harness.inputs.filter((input) => input.context.fix)).toHaveLength(0);
   });
 
   it("bounds an unknown trusted Git capture infrastructure failure", async () => {
@@ -843,9 +865,7 @@ describe("Phase 2C bounded coordinator", () => {
       );
       await expect(system.development.recoverOne(30_000)).resolves.toMatchObject({
         task: {
-          needsHumanReason: mode === "context"
-            ? "context_unavailable"
-            : "infrastructure_retry_exhausted",
+          needsHumanReason: "durable_integrity_failure",
           status: "needs_human"
         }
       });

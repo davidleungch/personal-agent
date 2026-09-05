@@ -602,7 +602,7 @@ describe("Phase 2A trusted development coordinator", () => {
     });
     expect(candidate.commit).toMatch(/^[0-9a-f]{40}$/);
     const recovered = await setup.coordinator.recoverOne(30_000);
-    expect(recovered?.candidate).toEqual(candidate);
+    expect(recovered?.task.status).toBe("candidate_ready");
     await expect(setup.persistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
       status: "candidate_ready"
     });
