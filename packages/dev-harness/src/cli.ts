@@ -1,10 +1,16 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { createDatabase, createDevelopmentRepositories, createReviewRepositories } from "@personal-agent/db";
+import {
+  createDatabase,
+  createDevelopmentRepositories,
+  createFixLoopRepositories,
+  createReviewRepositories
+} from "@personal-agent/db";
 import { developmentAcceptanceCriteriaSchema, type DevelopmentBudget } from "@personal-agent/shared";
 import { z } from "zod";
 import { DevelopmentCoordinator } from "./coordinator.js";
 import { DevelopmentContextCompiler } from "./context-compiler.js";
+import { FixLoopCoordinator, runBoundedFixLoop } from "./fix-loop-coordinator.js";
 import { TrustedGit } from "./git.js";
 import { OfficialPiTransport, PiDevelopmentHarness, type PiModelConfiguration } from "./pi-adapter.js";
 import { ReviewerContextCompiler } from "./reviewer-context-compiler.js";
@@ -157,7 +163,11 @@ export async function runDevelopmentCli(
     if (command === "recover-one") {
       return coordinator.recoverOne(Number(values.get("lease-ms") ?? 90_000));
     }
-    if (command === "review-once" || command === "recover-review") {
+    if (
+      command === "review-once" ||
+      command === "recover-review" ||
+      command === "fix-loop"
+    ) {
       const reviewer = new ReviewerCoordinator({
         contextCompiler: new ReviewerContextCompiler(git),
         developmentPersistence: persistence,
@@ -178,11 +188,32 @@ export async function runDevelopmentCli(
         readablePaths: list(values, "readable", ["AGENTS.md", "docs"]),
         relevantPaths: list(values, "relevant", [])
       };
-      return command === "review-once"
-        ? reviewer.runOne(policy)
-        : reviewer.recoverOne(policy.leaseDurationMs);
+      if (command === "review-once") return reviewer.runOne(policy);
+      if (command === "recover-review") return reviewer.recoverOne(policy.leaseDurationMs);
+      const fix = new FixLoopCoordinator({
+        developmentPersistence: persistence,
+        git,
+        persistence: createFixLoopRepositories(connection.database)
+      });
+      const implementationPolicy = {
+        allowedPaths: list(values, "allowed", ["."]),
+        budget: defaultBudget,
+        forbiddenPaths: list(values, "forbidden", [".git", ".pi", ".secrets", "browser-profile"]),
+        leaseDurationMs: Number(values.get("lease-ms") ?? 90_000),
+        modelProfile: z.enum(["fast", "balanced", "reasoning"]).parse(
+          values.get("implementer-profile") ?? "balanced"
+        ),
+        relevantPaths: list(values, "relevant", [])
+      };
+      return runBoundedFixLoop({
+        reconcile: () => fix.reconcileOne(),
+        runFix: (taskId) => coordinator.runOne(implementationPolicy, { fixOnly: true, taskId }),
+        runReview: (taskId) => reviewer.runOne(policy, { taskId })
+      });
     }
-    throw new Error("Expected task-create, run-once, recover-one, review-once, or recover-review");
+    throw new Error(
+      "Expected task-create, run-once, recover-one, review-once, recover-review, or fix-loop"
+    );
   } finally {
     await connection.close();
   }

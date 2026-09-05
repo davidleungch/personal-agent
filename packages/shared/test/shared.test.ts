@@ -15,6 +15,8 @@ import {
   developmentBudgetSchema,
   developmentContextManifestSchema,
   developmentEventStatusSchema,
+  developmentImplementerContextPolicySchema,
+  developmentNeedsHumanReasonSchema,
   developmentRoleSchema,
   developmentTaskStatusSchema,
   developmentUsageSchema,
@@ -65,9 +67,9 @@ describe("domain validation", () => {
     expect(() => jsonValueSchema.parse(Number.POSITIVE_INFINITY)).toThrow();
   });
 
-  it("validates the complete Phase 2A domain and transition policy", () => {
+  it("validates the complete development domain and transition policy", () => {
     expect(developmentRoleSchema.parse("implementer")).toBe("implementer");
-    expect(developmentTaskStatusSchema.options).toHaveLength(8);
+    expect(developmentTaskStatusSchema.options).toHaveLength(11);
     expect(developmentAttemptStatusSchema.options).toHaveLength(8);
     expect(developmentAttemptEventKindSchema.options).toHaveLength(7);
     expect(developmentEventStatusSchema.options).toHaveLength(5);
@@ -127,7 +129,16 @@ describe("domain validation", () => {
       }).entries
     ).toHaveLength(1);
     expect(canTransitionDevelopmentTask("ready", "preparing")).toBe(true);
+    expect(canTransitionDevelopmentTask("candidate_ready", "fix_required")).toBe(true);
+    expect(canTransitionDevelopmentTask("candidate_ready", "approved_candidate")).toBe(true);
+    expect(canTransitionDevelopmentTask("fix_required", "preparing")).toBe(true);
     expect(canTransitionDevelopmentTask("candidate_ready", "failed")).toBe(false);
+    expect(developmentNeedsHumanReasonSchema.parse("non_convergence")).toBe("non_convergence");
+    expect(developmentImplementerContextPolicySchema.parse({
+      allowedPaths: ["src"],
+      forbiddenPaths: [".git"],
+      relevantPaths: ["src/value.ts"]
+    }).allowedPaths).toEqual(["src"]);
     expect(canTransitionDevelopmentAttempt("preparing", "implementing")).toBe(true);
     expect(canTransitionDevelopmentAttempt("succeeded", "failed")).toBe(false);
   });

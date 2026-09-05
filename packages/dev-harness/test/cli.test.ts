@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   gitArguments: [] as unknown[],
   harnessTransports: [] as unknown[],
   piArguments: [] as unknown[],
+  reconcile: vi.fn(async () => ({ task: { id: "fix-task", status: "fix_required" } })),
   recoverOne: vi.fn(async () => ({ recovered: true })),
   recoverReview: vi.fn(async (input) => ({ recoveredReview: input })),
   reviewOne: vi.fn(async (input) => ({ reviewed: input })),
@@ -24,6 +25,7 @@ vi.mock("@personal-agent/db", () => ({
     state.databaseSecrets.push(secrets);
     return {};
   },
+  createFixLoopRepositories: () => ({}),
   createReviewRepositories: () => ({})
 }));
 vi.mock("../src/coordinator.js", () => ({
@@ -46,6 +48,21 @@ vi.mock("../src/reviewer-coordinator.js", () => ({
   ReviewerCoordinator: class {
     recoverOne = state.recoverReview;
     runOne = state.reviewOne;
+  }
+}));
+vi.mock("../src/fix-loop-coordinator.js", () => ({
+  FixLoopCoordinator: class {
+    reconcileOne = state.reconcile;
+  },
+  runBoundedFixLoop: async (input: {
+    reconcile: () => Promise<{ task: { id: string; status: string } }>;
+    runFix: (taskId: string) => Promise<unknown>;
+    runReview: (taskId: string) => Promise<unknown>;
+  }) => {
+    const reconciled = await input.reconcile();
+    await input.runFix(reconciled.task.id);
+    await input.runReview(reconciled.task.id);
+    return { fixed: reconciled.task.id };
   }
 }));
 vi.mock("../src/git.js", () => ({
@@ -84,6 +101,7 @@ beforeEach(() => {
     else if (Array.isArray(value)) value.splice(0);
   }
   state.createApprovedTask.mockResolvedValue({ created: true });
+  state.reconcile.mockResolvedValue({ task: { id: "fix-task", status: "fix_required" } });
   state.recoverOne.mockResolvedValue({ recovered: true });
   state.recoverReview.mockResolvedValue({ recoveredReview: true });
   state.reviewOne.mockResolvedValue({ reviewed: true });
@@ -252,6 +270,24 @@ describe("host-level development runner CLI", () => {
     }));
     await expect(runDevelopmentCli(["recover-review"], environment)).resolves.toEqual({ recoveredReview: true });
     expect(state.recoverReview).toHaveBeenCalledWith(90_000);
+
+    await expect(runDevelopmentCli([
+      "fix-loop", "--allowed", "src", "--readable", "src,docs",
+      "--implementer-profile", "fast", "--profile", "reasoning"
+    ], environment)).resolves.toEqual({ fixed: "fix-task" });
+    expect(state.runOne).toHaveBeenLastCalledWith(
+      expect.objectContaining({ allowedPaths: ["src"], modelProfile: "fast" }),
+      { fixOnly: true, taskId: "fix-task" }
+    );
+    expect(state.reviewOne).toHaveBeenLastCalledWith(
+      expect.objectContaining({ modelProfile: "reasoning", readablePaths: ["src", "docs"] }),
+      { taskId: "fix-task" }
+    );
+    await runDevelopmentCli(["fix-loop"], environment);
+    expect(state.runOne).toHaveBeenLastCalledWith(
+      expect.objectContaining({ modelProfile: "balanced" }),
+      { fixOnly: true, taskId: "fix-task" }
+    );
   });
 
   it("uses defaults and rejects malformed options, missing inputs, invalid auth, and unknown commands", async () => {

@@ -99,7 +99,10 @@ describe("clean PostgreSQL migrations", () => {
       expect(foreignKeys).toHaveLength(1);
       expect(foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
     }
-    expect(getTableConfig(developmentAttempts).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
+    expect(getTableConfig(developmentAttempts).foreignKeys).toHaveLength(2);
+    expect(
+      getTableConfig(developmentAttempts).foreignKeys.map((key) => key.reference().foreignColumns)
+    ).toEqual([[developmentTasks.id], [developmentReviews.id]]);
     expect(getTableConfig(developmentAttemptEvents).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
     expect(getTableConfig(developmentReviews).foreignKeys).toHaveLength(2);
     expect(getTableConfig(developmentReviews).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[developmentTasks.id], [developmentAttempts.id]]);

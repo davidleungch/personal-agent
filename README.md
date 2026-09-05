@@ -1,4 +1,4 @@
-# Personal Agent — Phase 2B
+# Personal Agent — Phase 2C
 
 Phase 1 is one Next.js app, one Node worker, and PostgreSQL. External model and
 Google credentials are optional: the base runtime starts healthy without them
@@ -149,12 +149,13 @@ The milestone evidence and complete Definition of Done matrix are in
 
 ## Phase 2 development runner
 
-Phase 2A adds a one-shot host-level Implementer runner and Phase 2B adds a
-separate one-shot independent Reviewer path. Neither is a Compose service, and
-the app/worker receive no Docker socket, development model credential, Git
-capability, or host shell. Implementation stops at exact `candidate_ready`;
-review stops after one durable `APPROVE` or `REQUEST_CHANGES` bound to that
-candidate. There is no autonomous retry/fix loop, merge, push, or deployment.
+Phase 2A adds a one-shot host-level Implementer runner, Phase 2B adds a
+separate independent Reviewer path, and Phase 2C adds only the bounded
+three-iteration correction loop. None is a Compose service, and the app/worker
+receive no Docker socket, development model credential, Git capability, or host
+shell. Every correction creates a new exact candidate and fresh review. The
+loop stops at `approved_candidate` or `needs_human`; there is no merge, push, or
+deployment.
 
 Build the externally isolated sandbox image:
 
@@ -226,11 +227,26 @@ pnpm --filter @personal-agent/dev-harness start -- \
   --profile reasoning
 ```
 
+Run the bounded Phase 2C loop only after an exact candidate has a finalized
+review. Reconciliation remains separate from role-pure Reviewer finalization.
+
+```sh
+DATABASE_URL=postgresql://personal_agent:personal_agent_local@127.0.0.1:5432/personal_agent \
+DEVELOPMENT_PI_AGENT_DIR=/var/lib/personal-agent/development-runner/pi \
+DEVELOPMENT_SANDBOX_IMAGE=personal-agent-development-sandbox:local \
+pnpm --filter @personal-agent/dev-harness start -- \
+  fix-loop \
+  --allowed packages/shared \
+  --readable AGENTS.md,docs,packages/shared \
+  --forbidden .git,.pi,.secrets,browser-profile \
+  --relevant packages/shared/src/domain.ts
+```
+
 If the runner stops after a lease, cleanup, or finalization failure, an
-authorized operator can run `recover-review`. The immutable Reviewer context
-policy is loaded from PostgreSQL, so recovery needs only lease configuration;
-it never resumes or invokes a Pi session and reconstructs authority from
-PostgreSQL, Git, and governing repository documents.
+authorized operator can run `recover-one` or `recover-review`. Recovery uses
+PostgreSQL, Git, and governing repository documents, starts a fresh role session
+when a bounded infrastructure retry is authorized, and never depends on prior
+Pi session state.
 
 Normal tests use a deterministic fake Pi transport and no provider account.
 The current Pi SDK is pinned to `0.84.3`; it requires Node 22.19 or newer, which

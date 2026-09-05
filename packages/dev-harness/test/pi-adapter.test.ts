@@ -156,6 +156,12 @@ describe("official Pi SDK adapter", () => {
             toolName: "sandbox.read",
             type: "tool_execution_end"
           });
+          listener({
+            isError: true,
+            toolCallId: "tool-2",
+            toolName: "sandbox.search",
+            type: "tool_execution_end"
+          });
           listener({ message: assistant(), type: "message_end" });
         }),
         subscribe: vi.fn((value: (event: unknown) => void) => {
@@ -207,6 +213,12 @@ describe("official Pi SDK adapter", () => {
         safeMetadata: { tool_call_id: "tool-1" },
         status: "success",
         tool: "sandbox.read"
+      },
+      {
+        kind: "tool",
+        safeMetadata: { tool_call_id: "tool-2" },
+        status: "failed",
+        tool: "sandbox.search"
       }
     ]);
     const options = sdkState.createAgentSession.mock.calls.at(-1)?.[0] as FakeSessionOptions;
@@ -326,6 +338,128 @@ describe("official Pi SDK adapter", () => {
       transport.run({ context, emit: () => undefined, modelProfile: "fast", signal: new AbortController().signal, tools: tools() })
     ).rejects.toThrow("unavailable");
     sdkState.modelAvailable = true;
+  });
+
+  it("requires a strict terminating result from every fresh Phase 2C fix session", async () => {
+    const fixContext: DevelopmentContext = {
+      ...context,
+      candidateDiff: "diff --git a/src/a.ts b/src/a.ts",
+      fix: {
+        findings: [{
+          acceptanceCriterionId: "fixture",
+          architectureReference: "docs/design.md#reviewer",
+          category: "correctness",
+          finding: "Incomplete behavior.",
+          relevantPath: "src/a.ts",
+          requiredCorrection: "Complete it.",
+          severity: "high"
+        }],
+        iteration: 1,
+        rejectedCandidateCommit: context.baseCommit,
+        sourceReviewId: "00000000-0000-4000-8000-000000000001"
+      }
+    };
+    const fixTools: DevelopmentToolSet = {
+      names: [...tools().names, "fix.submit"],
+      invoke: async (name) => ({ content: `fix ${name}`, safeMetadata: {} })
+    };
+    sdkState.createAgentSession.mockImplementationOnce(async (options: Record<string, unknown>) => ({
+      session: {
+        abort: vi.fn(async () => undefined),
+        dispose: vi.fn(),
+        messages: [assistant()],
+        prompt: vi.fn(async (prompt: string) => {
+          expect(prompt).toContain("Consumed authoritative review");
+          const submit = (options.customTools as FakeToolDefinition[]).find(
+            (tool) => tool.name === "fix.submit"
+          )!;
+          await submit.execute("fix-call", {
+            outcome: "NEEDS_HUMAN",
+            reason: "architecture_conflict"
+          });
+        }),
+        subscribe: vi.fn(() => vi.fn())
+      }
+    }));
+    const transport = new OfficialPiTransport({
+      agentDirectory: "/tmp/fix-pi",
+      models: {
+        balanced: { modelId: "balanced-id", providerId: "provider" },
+        fast: { modelId: "fast-id", providerId: "provider" },
+        reasoning: { modelId: "reasoning-id", providerId: "provider" }
+      }
+    });
+    await expect(transport.run({
+      context: fixContext,
+      emit: () => undefined,
+      modelProfile: "balanced",
+      signal: new AbortController().signal,
+      tools: fixTools
+    })).resolves.toMatchObject({
+      needsHumanReason: "architecture_conflict",
+      outcome: "needs_human"
+    });
+    expect((sdkState.loaders.at(-1)?.options.systemPromptOverride as () => string)()).toContain(
+      "Phase 2C fix Implementer"
+    );
+  });
+
+  it("accepts FIX_COMPLETE and rejects absent or duplicate fix submissions", async () => {
+    const fixContext: DevelopmentContext = {
+      ...context,
+      fix: {
+        findings: [],
+        iteration: 1,
+        rejectedCandidateCommit: context.baseCommit,
+        sourceReviewId: "00000000-0000-4000-8000-000000000022"
+      }
+    };
+    const fixTools: DevelopmentToolSet = {
+      names: [...tools().names, "fix.submit"],
+      invoke: async () => ({ content: "fix", safeMetadata: {} })
+    };
+    const transport = new OfficialPiTransport({
+      agentDirectory: "/tmp/fix-result-pi",
+      models: {
+        balanced: { modelId: "balanced-id", providerId: "provider" },
+        fast: { modelId: "fast-id", providerId: "provider" },
+        reasoning: { modelId: "reasoning-id", providerId: "provider" }
+      }
+    });
+    for (const mode of ["complete", "absent", "duplicate"] as const) {
+      sdkState.createAgentSession.mockImplementationOnce(async (options: Record<string, unknown>) => ({
+        session: {
+          abort: vi.fn(async () => undefined),
+          dispose: vi.fn(),
+          messages: [assistant()],
+          prompt: vi.fn(async () => {
+            if (mode === "absent") return;
+            const submit = (options.customTools as FakeToolDefinition[]).find(
+              (tool) => tool.name === "fix.submit"
+            )!;
+            await submit.execute("fix-call", { outcome: "FIX_COMPLETE" });
+            if (mode === "duplicate") {
+              await submit.execute("fix-call-2", { outcome: "FIX_COMPLETE" });
+            }
+          }),
+          subscribe: vi.fn(() => vi.fn())
+        }
+      }));
+      const result = transport.run({
+        context: fixContext,
+        emit: () => undefined,
+        modelProfile: "balanced",
+        signal: new AbortController().signal,
+        tools: fixTools
+      });
+      if (mode === "complete") {
+        await expect(result).resolves.toMatchObject({ outcome: "completion_proposed" });
+      } else if (mode === "absent") {
+        await expect(result).resolves.toMatchObject({ outcome: "malformed_output" });
+      } else {
+        await expect(result).rejects.toThrow("more than once");
+      }
+    }
   });
 });
 
@@ -471,6 +605,49 @@ describe("project-owned Pi DevelopmentHarness", () => {
     await blocking.abort(active.executionId);
     release();
     expect((await collecting).at(-1)).toMatchObject({ failureClass: "aborted", kind: "failed" });
+  });
+
+  it("normalizes a Phase 2C human-escalation proposal", async () => {
+    const fixContext: DevelopmentContext = {
+      ...context,
+      fix: {
+        findings: [],
+        iteration: 1,
+        rejectedCandidateCommit: context.baseCommit,
+        sourceReviewId: "00000000-0000-4000-8000-000000000020"
+      }
+    };
+    const harness = new PiDevelopmentHarness({
+      run: async () => ({
+        needsHumanReason: "scope_expansion_required",
+        outcome: "needs_human",
+        usage: zeroUsageFixture()
+      })
+    });
+    expect((await events(await harness.execute({
+      attemptId: "00000000-0000-4000-8000-000000000021",
+      budget,
+      context: fixContext,
+      modelProfile: "balanced",
+      role: "implementer",
+      tools: tools()
+    }))).at(-1)).toMatchObject({
+      kind: "completed",
+      reason: "scope_expansion_required",
+      result: "needs_human_proposed"
+    });
+
+    const malformed = new PiDevelopmentHarness({
+      run: async () => ({ outcome: "needs_human", usage: zeroUsageFixture() })
+    });
+    expect((await events(await malformed.execute({
+      attemptId: "00000000-0000-4000-8000-000000000023",
+      budget,
+      context: fixContext,
+      modelProfile: "balanced",
+      role: "implementer",
+      tools: tools()
+    }))).at(-1)).toMatchObject({ failureClass: "provider", kind: "failed" });
   });
 
   it("normalizes Reviewer completion and malformed structured transport output", async () => {

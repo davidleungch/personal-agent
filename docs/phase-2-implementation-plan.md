@@ -12,10 +12,10 @@ Current status:
 | Phase or milestone | Status |
 | --- | --- |
 | Phase 1 — ACT | **COMPLETE** |
-| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C NOT STARTED** |
+| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C IMPLEMENTATION** |
 | Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
 | Phase 2B — Independent Reviewer | **COMPLETE** |
-| Phase 2C — Autonomous Fix Loop | **NOT STARTED / NOT AUTHORIZED FOR IMPLEMENTATION** |
+| Phase 2C — Autonomous Fix Loop | **IN PROGRESS / IMPLEMENTATION AUTHORIZED** |
 | Phase 2D — Auto-Merge + Deploy | **NOT STARTED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
@@ -24,8 +24,8 @@ Phase 2A was separately authorized by the user and completed on 2026-08-28.
 Phase 2B was separately authorized and independently accepted at checkpoint
 `f51aa91437317b1c9a6f66f4ae510748a9abb0e0`. Its completion does not authorize
 Phase 2C. [`phase-2c-bounded-fix-loop.md`](phase-2c-bounded-fix-loop.md) is the
-approved governing contract for future Phase 2C planning and implementation;
-its presence does not authorize either activity. Each later milestone requires
+approved governing contract for the explicitly authorized Phase 2C implementation.
+Phase 2C authorization does not authorize Phase 2D. Each later milestone requires
 separate authorization after review of the preceding milestone. No milestone
 passing implicitly starts the next one.
 
@@ -385,7 +385,6 @@ their owning milestones.
 | `acceptance_criteria` | Validated explicit criteria used by tests and final candidate checks. |
 | `status` | Authoritative task lifecycle and eligibility for deterministic advancement. |
 | `base_commit` | Exact immutable Git revision from which every Phase 2A workspace is created. |
-| `max_attempts` | Durable deterministic attempt cap; Phase 2A requires the value `1`. |
 | `approved_at` | Proof that explicit approval preceded execution eligibility. |
 | `created_at` | Audit ordering and age. |
 | `updated_at` | Safe concurrency/status projection for user inspection. |
@@ -460,8 +459,9 @@ delta, and relevant safe identifiers. They do not store prompts, transcripts,
 hidden reasoning, unrestricted model output, complete source/diffs, environment
 variables, credentials, or raw build/test output.
 
-Required constraints include unique `(task_id, attempt_number)`, unique
-`(attempt_id, sequence)`, exact commit-format validation, restrictive historical
+Required constraints include one initial attempt per task, unique
+`(task_id, attempt_number)`, unique `(attempt_id, sequence)`, exact commit-format
+validation, restrictive historical
 foreign keys, and transactional/fenced task-attempt transitions. Candidate
 fields may become non-null only together after the trusted Git ref verifies.
 
@@ -807,13 +807,14 @@ exactly 100% for statements, branches, functions, and lines; and Node 22.19.0
 validation passed. No Phase 2C, merge, push, deployment, or Phase 3 authority was
 present during acceptance.
 
-Phase 2C remains **NOT STARTED / NOT AUTHORIZED FOR IMPLEMENTATION**.
+Phase 2C implementation is explicitly authorized and in progress. It is not
+complete until independent acceptance occurs.
 
 # Phase 2C — Autonomous Fix Loop
 
 [`phase-2c-bounded-fix-loop.md`](phase-2c-bounded-fix-loop.md) is the governing
-contract for future Phase 2C planning and implementation. Phase 2C remains **NOT
-STARTED / NOT AUTHORIZED FOR IMPLEMENTATION**.
+contract for the authorized implementation. Phase 2C remains **IN PROGRESS** and
+must not be marked complete by its Implementer session.
 
 ## Contract
 

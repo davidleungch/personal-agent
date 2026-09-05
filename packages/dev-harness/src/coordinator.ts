@@ -7,10 +7,12 @@ import {
 import {
   developmentAcceptanceCriteriaSchema,
   developmentBudgetSchema,
+  developmentImplementerContextPolicySchema,
   emptyDevelopmentUsage,
   isSecretFreeText,
   modelProfileSchema,
   type DevelopmentBudget,
+  type DevelopmentNeedsHumanReason,
   type DevelopmentTaskStatus,
   type JsonObject,
   type ModelProfile
@@ -22,6 +24,26 @@ import { TrustedGit } from "./git.js";
 import { SandboxGateway, type SandboxManager, type SandboxWorkspace } from "./sandbox.js";
 
 type DevelopmentPersistence = ReturnType<typeof createDevelopmentRepositories>;
+type ClaimedDevelopment = {
+  attempt: NonNullable<Awaited<ReturnType<DevelopmentPersistence["getDevelopmentAttempt"]>>>;
+  sourceReview?: NonNullable<Awaited<ReturnType<DevelopmentPersistence["getConsumedFixAttemptInput"]>>>["sourceReview"];
+  task: NonNullable<Awaited<ReturnType<DevelopmentPersistence["getDevelopmentTask"]>>>;
+};
+
+class InfrastructureExecutionError extends Error {
+  constructor(readonly failureClass: string) {
+    super(`Development infrastructure failed: ${failureClass}`);
+  }
+}
+class CandidateCaptureInfrastructureError extends InfrastructureExecutionError {}
+
+class DeterministicTestError extends Error {}
+class NonConvergenceError extends Error {}
+class NeedsHumanProposal extends Error {
+  constructor(readonly reason: DevelopmentNeedsHumanReason) {
+    super(`Fix Implementer requested human action: ${reason}`);
+  }
+}
 
 export type DevelopmentRunPolicy = {
   allowedPaths: readonly string[];
@@ -62,22 +84,152 @@ export class DevelopmentCoordinator {
     });
   }
 
-  async runOne(policyInput: DevelopmentRunPolicy) {
+  async runOne(
+    policyInput: DevelopmentRunPolicy,
+    options: { fixOnly?: boolean; taskId?: string } = {}
+  ) {
     const policy = {
       ...policyInput,
       budget: developmentBudgetSchema.parse(policyInput.budget),
       modelProfile: modelProfileSchema.parse(policyInput.modelProfile)
     };
-    const claimed = await this.dependencies.persistence.claimReadyDevelopmentTask({
-      budget: policy.budget,
-      leaseDurationMs: policy.leaseDurationMs,
-      modelProfile: policy.modelProfile,
-      now: new Date(),
-      runnerId: this.dependencies.runnerId
-    });
+    const contextPolicy = options.fixOnly
+      ? developmentImplementerContextPolicySchema.parse({
+          allowedPaths: policy.allowedPaths,
+          forbiddenPaths: policy.forbiddenPaths,
+          relevantPaths: policy.relevantPaths
+        })
+      : undefined;
+    const claimed = options.fixOnly
+      ? await this.dependencies.persistence.claimFixRequiredDevelopmentTask({
+          budget: policy.budget,
+          contextPolicy: contextPolicy!,
+          leaseDurationMs: policy.leaseDurationMs,
+          modelProfile: policy.modelProfile,
+          runnerId: this.dependencies.runnerId,
+          ...(options.taskId ? { taskId: options.taskId } : {})
+        })
+      : await this.dependencies.persistence.claimReadyDevelopmentTask({
+          budget: policy.budget,
+          leaseDurationMs: policy.leaseDurationMs,
+          modelProfile: policy.modelProfile,
+          now: new Date(),
+          runnerId: this.dependencies.runnerId,
+          ...(options.taskId ? { taskId: options.taskId } : {})
+        });
     if (!claimed) return undefined;
+    return this.executeWithRetries(claimed as ClaimedDevelopment, policy);
+  }
 
-    const { attempt, task } = claimed;
+  private async executeWithRetries(
+    claimed: ClaimedDevelopment,
+    policy: DevelopmentRunPolicy
+  ): Promise<unknown> {
+    let current = claimed;
+    while (true) {
+      try {
+        return await this.executeClaimed(current, policy);
+      } catch (error) {
+        if (error instanceof DevelopmentLeaseError) throw error;
+        if (error instanceof CandidateCaptureInfrastructureError) {
+          const candidate = await this.dependencies.git.verifyCandidateRef(
+            current.attempt.id,
+            current.attempt.baseCommit
+          );
+          if (candidate) {
+            return this.dependencies.persistence.recordDevelopmentCandidate({
+              attemptId: current.attempt.id,
+              candidateCommit: candidate.commit,
+              candidateRef: candidate.ref,
+              leaseGeneration: current.attempt.leaseGeneration,
+              now: new Date(),
+              runnerId: this.dependencies.runnerId,
+              safeSummary: "Candidate reconciled after uncertain trusted Git capture"
+            });
+          }
+        }
+        if (!current.attempt.fixIteration) {
+          const latest = await this.dependencies.persistence.getDevelopmentAttempt(
+            current.attempt.id
+          );
+          if (latest?.status === "succeeded") throw error;
+          const failureClass = error instanceof DevelopmentBudgetError
+            ? "budget_exhausted"
+            : error instanceof z.ZodError
+              ? "validation"
+              : "execution";
+          try {
+            await this.dependencies.persistence.transitionDevelopmentAttempt({
+              attemptId: current.attempt.id,
+              attemptStatus: "failed",
+              failureClass,
+              leaseGeneration: current.attempt.leaseGeneration,
+              now: new Date(),
+              runnerId: this.dependencies.runnerId,
+              safeSummary: "Phase 2A attempt terminated without a candidate",
+              taskStatus: "failed"
+            });
+          } catch (transitionError) {
+            if (!(transitionError instanceof DevelopmentLeaseError)) throw transitionError;
+          }
+          throw error;
+        }
+        const reason = error instanceof NeedsHumanProposal
+          ? error.reason
+          : error instanceof DeterministicTestError
+            ? "deterministic_test_failure"
+            : error instanceof NonConvergenceError
+              ? "non_convergence"
+              : error instanceof DevelopmentBudgetError
+              ? "execution_budget_exhausted"
+              : error instanceof z.ZodError
+                ? "context_unavailable"
+                : undefined;
+        if (reason) {
+          return this.dependencies.persistence.markDevelopmentNeedsHuman({
+            attemptId: current.attempt.id,
+            failureClass: (error as Error).constructor.name,
+            leaseGeneration: current.attempt.leaseGeneration,
+            reason,
+            runnerId: this.dependencies.runnerId
+          });
+        }
+        if (current.attempt.infrastructureRetryCount < 2) {
+          if (!await this.dependencies.persistence.lastDevelopmentTeardownSucceeded(
+            current.attempt.id
+          )) {
+            return this.dependencies.persistence.markDevelopmentNeedsHuman({
+              attemptId: current.attempt.id,
+              failureClass: "workspace_cleanup_failed",
+              leaseGeneration: current.attempt.leaseGeneration,
+              reason: "durable_integrity_failure",
+              runnerId: this.dependencies.runnerId
+            });
+          }
+          const retried = await this.dependencies.persistence.prepareDevelopmentInfrastructureRetry({
+            attemptId: current.attempt.id,
+            failureClass:
+              error instanceof InfrastructureExecutionError ? error.failureClass : "infrastructure",
+            leaseDurationMs: policy.leaseDurationMs,
+            leaseGeneration: current.attempt.leaseGeneration,
+            runnerId: this.dependencies.runnerId
+          });
+          current = { ...current, attempt: retried.attempt, task: retried.task };
+          continue;
+        }
+        return this.dependencies.persistence.markDevelopmentNeedsHuman({
+          attemptId: current.attempt.id,
+          failureClass: "infrastructure_retry_exhausted",
+          leaseGeneration: current.attempt.leaseGeneration,
+          reason: "infrastructure_retry_exhausted",
+          runnerId: this.dependencies.runnerId
+        });
+      }
+    }
+  }
+
+  private async executeClaimed(claimed: ClaimedDevelopment, policy: DevelopmentRunPolicy) {
+    const { attempt, sourceReview, task } = claimed;
     const fence = {
       attemptId: attempt.id,
       leaseGeneration: attempt.leaseGeneration,
@@ -85,6 +237,7 @@ export class DevelopmentCoordinator {
     };
     let taskStatus: DevelopmentTaskStatus = "preparing";
     let workspace: SandboxWorkspace | undefined;
+    let executionId: string | undefined;
     const heartbeatAbort = new AbortController();
     let heartbeatFailure: unknown;
     const heartbeat = setInterval(() => {
@@ -99,7 +252,6 @@ export class DevelopmentCoordinator {
           heartbeatAbort.abort();
         });
     }, Math.max(250, Math.floor(policy.leaseDurationMs / 3)));
-
     const ensureHeartbeat = () => {
       if (heartbeatFailure) throw heartbeatFailure;
     };
@@ -107,23 +259,46 @@ export class DevelopmentCoordinator {
       kind: "harness" | "tool" | "test" | "git" | "budget" | "teardown",
       status: "started" | "success" | "failed" | "unknown" | "blocked",
       safeMetadata: JsonObject = {}
-    ) =>
-      this.dependencies.persistence.appendDevelopmentAttemptEvent({
-        ...fence,
-        kind,
-        now: new Date(),
-        safeMetadata,
-        status
-      });
+    ) => this.dependencies.persistence.appendDevelopmentAttemptEvent({
+      ...fence,
+      kind,
+      now: new Date(),
+      safeMetadata,
+      status
+    });
 
     try {
+      const storedPolicy = attempt.fixIteration
+        ? developmentImplementerContextPolicySchema.parse(attempt.contextPolicy)
+        : {
+            allowedPaths: [...policy.allowedPaths],
+            forbiddenPaths: [...policy.forbiddenPaths],
+            relevantPaths: [...policy.relevantPaths]
+          };
       const context = await this.dependencies.contextCompiler.compile({
         acceptanceCriteria: task.acceptanceCriteria,
-        allowedPaths: policy.allowedPaths,
-        baseCommit: task.baseCommit,
+        allowedPaths: storedPolicy.allowedPaths,
+        authorityBaseCommit: task.baseCommit,
+        baseCommit: attempt.baseCommit,
         budget: attempt.budget,
-        forbiddenPaths: policy.forbiddenPaths,
-        relevantPaths: policy.relevantPaths,
+        ...(attempt.fixIteration
+          ? {
+              fix: {
+                findings: sourceReview!.findings,
+                iteration: attempt.fixIteration,
+                sourceReviewId: sourceReview!.id
+              }
+            }
+          : {}),
+        forbiddenPaths: storedPolicy.forbiddenPaths,
+        relevantPaths: [
+          ...new Set([
+            ...storedPolicy.relevantPaths,
+            ...(sourceReview?.findings.flatMap((finding) =>
+              finding.relevantPath ? [finding.relevantPath] : []
+            ) ?? [])
+          ])
+        ],
         specification: task.approvedSpec,
         taskTitle: task.title,
         usage: attempt.usage
@@ -136,7 +311,7 @@ export class DevelopmentCoordinator {
       });
       ensureHeartbeat();
 
-      const workspacePath = await this.dependencies.git.createWorktree(attempt.id, task.baseCommit);
+      const workspacePath = await this.dependencies.git.createWorktree(attempt.id, attempt.baseCommit);
       workspace = this.dependencies.sandboxManager.identify({
         sandboxId: attempt.sandboxId,
         workspacePath
@@ -145,7 +320,7 @@ export class DevelopmentCoordinator {
         sandboxId: attempt.sandboxId,
         workspacePath
       });
-      await this.dependencies.git.verifyWorkspaceBase(workspace.path, task.baseCommit);
+      await this.dependencies.git.verifyWorkspaceBase(workspace.path, attempt.baseCommit);
       await this.dependencies.persistence.transitionDevelopmentAttempt({
         ...fence,
         attemptStatus: "implementing",
@@ -156,17 +331,20 @@ export class DevelopmentCoordinator {
       taskStatus = "implementing";
 
       const gateway = new SandboxGateway({
-        allowedPaths: policy.allowedPaths,
+        allowedPaths: storedPolicy.allowedPaths,
         budget: policy.budget,
-        forbiddenPaths: policy.forbiddenPaths,
+        ...(attempt.fixIteration ? { fix: true } : {}),
+        forbiddenPaths: storedPolicy.forbiddenPaths,
         git: this.dependencies.git,
         knownSecrets: this.dependencies.knownSecrets ?? [],
         onAudit: ({ safeMetadata, status, tool }) =>
           appendEvent("tool", status, { ...safeMetadata, tool }).then(() => undefined),
         onUsage: (delta) =>
-          this.dependencies.persistence
-            .recordDevelopmentUsage({ ...fence, delta, now: new Date() })
-            .then(() => undefined),
+          this.dependencies.persistence.recordDevelopmentUsage({
+            ...fence,
+            delta,
+            now: new Date()
+          }).then(() => undefined),
         sandboxManager: this.dependencies.sandboxManager,
         workspace
       });
@@ -179,6 +357,7 @@ export class DevelopmentCoordinator {
         signal: heartbeatAbort.signal,
         tools: gateway
       });
+      executionId = execution.executionId;
       let completionProposed = false;
       for await (const event of execution.events) {
         ensureHeartbeat();
@@ -190,8 +369,12 @@ export class DevelopmentCoordinator {
           });
         } else if (event.kind === "failed") {
           await appendEvent("harness", "failed", { failure_class: event.failureClass });
-          throw new Error(`Development harness failed: ${event.failureClass}`);
+          throw new InfrastructureExecutionError(event.failureClass);
         } else if (event.kind === "completed") {
+          if (event.result === "needs_human_proposed") throw new NeedsHumanProposal(event.reason);
+          if (event.result !== "completion_proposed") {
+            throw new InfrastructureExecutionError("malformed_output");
+          }
           completionProposed = true;
           await appendEvent("harness", "success", { result: event.result });
         } else if (event.kind === "tool") {
@@ -200,8 +383,9 @@ export class DevelopmentCoordinator {
           await appendEvent("harness", "started", event.safeMetadata);
         }
       }
-      if (!completionProposed) throw new Error("Harness ended without a completion proposal");
+      if (!completionProposed) throw new InfrastructureExecutionError("malformed_output");
       await this.dependencies.harness.abort(execution.executionId);
+      executionId = undefined;
       ensureHeartbeat();
 
       await this.dependencies.persistence.transitionDevelopmentAttempt({
@@ -212,11 +396,8 @@ export class DevelopmentCoordinator {
       });
       taskStatus = "testing";
       await stat(workspace.path);
-      await this.dependencies.git.verifyWorkspaceBase(workspace.path, task.baseCommit);
-      await this.dependencies.git.verifyWorkspaceSize(
-        workspace.path,
-        policy.budget.maxWorkspaceBytes
-      );
+      await this.dependencies.git.verifyWorkspaceBase(workspace.path, attempt.baseCommit);
+      await this.dependencies.git.verifyWorkspaceSize(workspace.path, policy.budget.maxWorkspaceBytes);
 
       const criteria = developmentAcceptanceCriteriaSchema.parse(task.acceptanceCriteria);
       for (const criterion of criteria) {
@@ -250,6 +431,7 @@ export class DevelopmentCoordinator {
             duration_ms: check.durationMs,
             exit_code: check.exitCode
           });
+          if (attempt.fixIteration) throw new DeterministicTestError();
           throw new Error(`Deterministic acceptance check failed: ${criterion.id}`);
         }
         await appendEvent("test", "success", {
@@ -270,56 +452,45 @@ export class DevelopmentCoordinator {
       const result = await this.dependencies.persistence.captureDevelopmentCandidate({
         ...fence,
         capture: async () => {
-          const candidate = await this.dependencies.git.captureCandidate({
-            allowedPaths: policy.allowedPaths,
-            attemptId: attempt.id,
-            baseCommit: task.baseCommit,
-            forbiddenPaths: policy.forbiddenPaths,
-            maxDiffBytes: policy.budget.maxDiffBytes,
-            workspacePath: candidateWorkspace.path
-          });
+          let candidate;
+          try {
+            candidate = await this.dependencies.git.captureCandidate({
+              allowedPaths: storedPolicy.allowedPaths,
+              attemptId: attempt.id,
+              baseCommit: attempt.baseCommit,
+              forbiddenPaths: storedPolicy.forbiddenPaths,
+              maxDiffBytes: policy.budget.maxDiffBytes,
+              workspacePath: candidateWorkspace.path
+            });
+          } catch (error) {
+            if (error instanceof Error && error.message === "Candidate diff is empty") {
+              throw new NonConvergenceError(error.message);
+            }
+            throw new CandidateCaptureInfrastructureError(
+              error instanceof Error ? error.name : "git_capture"
+            );
+          }
           const verified = await this.dependencies.git.verifyCandidateRef(
             attempt.id,
-            task.baseCommit,
+            attempt.baseCommit,
             candidate.commit
           );
-          if (!verified) throw new Error("Trusted candidate ref disappeared before persistence");
+          if (!verified) {
+            throw new CandidateCaptureInfrastructureError("candidate_ref_unavailable");
+          }
           return { candidateCommit: candidate.commit, candidateRef: candidate.ref };
         },
         now: new Date(),
-        safeSummary: "Candidate captured after deterministic Phase 2A checks"
+        safeSummary: attempt.fixIteration
+          ? `Phase 2C fix candidate ${attempt.fixIteration} captured after deterministic checks`
+          : "Candidate captured after deterministic Phase 2A checks"
       });
       taskStatus = "candidate_ready";
       return result;
-    } catch (error) {
-      if (
-        !(error instanceof DevelopmentLeaseError) &&
-        !heartbeatFailure
-      ) {
-        const failureClass =
-          error instanceof DevelopmentBudgetError
-            ? "budget_exhausted"
-            : error instanceof z.ZodError
-              ? "validation"
-              : "execution";
-        try {
-          await this.dependencies.persistence.transitionDevelopmentAttempt({
-            ...fence,
-            attemptStatus: "failed",
-            failureClass,
-            now: new Date(),
-            safeSummary: "Phase 2A attempt terminated without a candidate",
-            taskStatus: "failed"
-          });
-          taskStatus = "failed";
-        } catch (transitionError) {
-          if (!(transitionError instanceof DevelopmentLeaseError)) throw transitionError;
-        }
-      }
-      throw error;
     } finally {
       clearInterval(heartbeat);
       heartbeatAbort.abort();
+      if (executionId) await this.dependencies.harness.abort(executionId).catch(() => undefined);
       if (workspace) {
         let teardownStatus: "success" | "failed" = "success";
         try {
@@ -351,10 +522,9 @@ export class DevelopmentCoordinator {
       attempt.id,
       attempt.baseCommit
     );
-    const workspacePath = this.dependencies.git.workspacePath(attempt.id);
     const workspace = this.dependencies.sandboxManager.identify({
       sandboxId: attempt.sandboxId,
-      workspacePath
+      workspacePath: this.dependencies.git.workspacePath(attempt.id)
     });
     if (candidate) {
       await this.dependencies.persistence.reconcileDevelopmentCandidate({
@@ -378,6 +548,46 @@ export class DevelopmentCoordinator {
       safeMetadata: { recovery: true, sandbox_id: attempt.sandboxId },
       status: "success"
     });
+    if (!candidate && attempt.fixIteration) {
+      const durable = await this.dependencies.persistence.getConsumedFixAttemptInput(attempt.id);
+      if (!durable) {
+        return this.dependencies.persistence.markDevelopmentNeedsHuman({
+          attemptId: attempt.id,
+          failureClass: "context_unavailable",
+          leaseGeneration: attempt.leaseGeneration,
+          reason: "context_unavailable",
+          runnerId: this.dependencies.runnerId
+        });
+      }
+      if (attempt.infrastructureRetryCount >= 2) {
+        return this.dependencies.persistence.markDevelopmentNeedsHuman({
+          attemptId: attempt.id,
+          failureClass: "infrastructure_retry_exhausted",
+          leaseGeneration: attempt.leaseGeneration,
+          reason: "infrastructure_retry_exhausted",
+          runnerId: this.dependencies.runnerId
+        });
+      }
+      const retried = await this.dependencies.persistence.prepareDevelopmentInfrastructureRetry({
+        attemptId: attempt.id,
+        failureClass: "lease_expired",
+        leaseDurationMs,
+        leaseGeneration: attempt.leaseGeneration,
+        runnerId: this.dependencies.runnerId
+      });
+      const contextPolicy = developmentImplementerContextPolicySchema.parse(attempt.contextPolicy);
+      return this.executeWithRetries(
+        { ...durable, attempt: retried.attempt, task: retried.task },
+        {
+          allowedPaths: contextPolicy.allowedPaths,
+          budget: developmentBudgetSchema.parse(attempt.budget),
+          forbiddenPaths: contextPolicy.forbiddenPaths,
+          leaseDurationMs,
+          modelProfile: modelProfileSchema.parse(attempt.modelProfile),
+          relevantPaths: contextPolicy.relevantPaths
+        }
+      );
+    }
     return { attempt, candidate };
   }
 

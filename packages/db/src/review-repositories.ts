@@ -5,6 +5,7 @@ import {
   developmentAcceptanceCriteriaSchema,
   developmentBudgetSchema,
   developmentEventStatusSchema,
+  developmentNeedsHumanReasonSchema,
   developmentReviewerContextManifestSchema,
   developmentReviewerContextPolicySchema,
   developmentReviewEventKindSchema,
@@ -20,7 +21,7 @@ import {
   type DevelopmentUsage,
   type JsonObject
 } from "@personal-agent/shared";
-import { and, asc, eq, isNotNull, isNull, max, notExists, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "./database.js";
 import { DevelopmentBudgetError, DevelopmentLeaseError, DevelopmentTransitionError } from "./development-repositories.js";
@@ -72,6 +73,7 @@ function usageWithinBudget(usage: DevelopmentUsage, budget: DevelopmentBudget): 
 }
 
 export type ReviewRepositoryTestHooks = {
+  afterClaimExistingLock?: (reviewId: string) => Promise<void>;
   afterFinalizeLock?: (reviewId: string) => Promise<void>;
   afterReclaimLock?: (reviewId: string) => Promise<void>;
 };
@@ -167,7 +169,7 @@ export function createReviewRepositories(
     return { ...row, attemptEvents: events };
   }
 
-  return {
+  const repositories = {
     appendReviewEvent: async (input: {
       kind: z.input<typeof developmentReviewEventKindSchema>;
       leaseGeneration: number;
@@ -199,30 +201,54 @@ export function createReviewRepositories(
       leaseDurationMs: number;
       modelProfile: unknown;
       runnerId: string;
+      taskId?: string;
     }) => {
       const value = z.object({
         budget: developmentBudgetSchema,
         contextPolicy: developmentReviewerContextPolicySchema,
         leaseDurationMs: positiveDurationSchema,
         modelProfile: modelProfileSchema,
-        runnerId: shortText
+        runnerId: shortText,
+        taskId: uuidSchema.optional()
       }).strict().parse(input);
       return database.transaction(async (transaction) => {
+        const taskConditions = [
+          eq(developmentTasks.status, "candidate_ready"),
+          isNull(developmentTasks.authorityInvalidatedAt),
+          sql`(
+            not exists (
+              select 1
+              from development_reviews existing_review
+              join development_attempts reviewed_attempt
+                on reviewed_attempt.id = existing_review.implementer_attempt_id
+              where existing_review.task_id = ${developmentTasks.id}
+                and reviewed_attempt.attempt_number = (
+                  select max(latest_attempt.attempt_number)
+                  from development_attempts latest_attempt
+                  where latest_attempt.task_id = ${developmentTasks.id}
+                )
+            ) or exists (
+              select 1
+              from development_reviews retry_review
+              join development_attempts retry_attempt
+                on retry_attempt.id = retry_review.implementer_attempt_id
+              where retry_review.task_id = ${developmentTasks.id}
+                and retry_attempt.attempt_number = (
+                  select max(latest_attempt.attempt_number)
+                  from development_attempts latest_attempt
+                  where latest_attempt.task_id = ${developmentTasks.id}
+                )
+                and retry_review.status = 'preparing'
+                and retry_review.lease_owner = ${value.runnerId}
+                and retry_review.lease_expires_at > clock_timestamp()
+            )
+          )`
+        ];
+        if (value.taskId) taskConditions.push(eq(developmentTasks.id, value.taskId));
         const [task] = await transaction
           .select()
           .from(developmentTasks)
-          .where(
-            and(
-              eq(developmentTasks.status, "candidate_ready"),
-              isNull(developmentTasks.authorityInvalidatedAt),
-              notExists(
-                transaction
-                  .select({ id: developmentReviews.id })
-                  .from(developmentReviews)
-                  .where(eq(developmentReviews.taskId, developmentTasks.id))
-              )
-            )
-          )
+          .where(and(...taskConditions))
           .orderBy(asc(developmentTasks.createdAt), asc(developmentTasks.id))
           .limit(1)
           .for("update", { skipLocked: true });
@@ -237,10 +263,34 @@ export function createReviewRepositories(
               eq(developmentAttempts.status, "succeeded")
             )
           )
+          .orderBy(sql`${developmentAttempts.attemptNumber} desc`)
           .limit(1)
           .for("update");
         if (!attempt?.candidateCommit || !attempt.candidateRef || !attempt.contextDigest) {
           throw new DevelopmentTransitionError("Candidate is missing required durable implementation evidence");
+        }
+        const [existingReview] = await transaction
+          .select()
+          .from(developmentReviews)
+          .where(eq(developmentReviews.implementerAttemptId, attempt.id))
+          .limit(1)
+          .for("update");
+        if (existingReview) {
+          await testHooks.afterClaimExistingLock?.(existingReview.id);
+          const databaseNow = await freshDatabaseTime(transaction);
+          if (
+            existingReview.status !== "preparing" ||
+            existingReview.leaseOwner !== value.runnerId ||
+            existingReview.leaseExpiresAt <= databaseNow
+          ) {
+            return undefined;
+          }
+          const attemptEvents = await transaction
+            .select()
+            .from(developmentAttemptEvents)
+            .where(eq(developmentAttemptEvents.attemptId, attempt.id))
+            .orderBy(asc(developmentAttemptEvents.sequence));
+          return { attempt, review: existingReview, task, attemptEvents };
         }
         const databaseNow = await freshDatabaseTime(transaction);
         const attemptEvents = await transaction
@@ -264,6 +314,7 @@ export function createReviewRepositories(
             implementerAttemptId: attempt.id,
             leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
             leaseGeneration: 1,
+            infrastructureRetryCount: 0,
             leaseOwner: value.runnerId,
             modelProfile: value.modelProfile,
             retentionRef: `refs/personal-agent/reviews/${reviewId}`,
@@ -289,6 +340,7 @@ export function createReviewRepositories(
 
     completeReviewFailure: async (input: {
       leaseGeneration: number;
+      needsHumanReason?: unknown;
       now: Date;
       reviewId: string;
       runnerId: string;
@@ -316,11 +368,36 @@ export function createReviewRepositories(
           })
           .where(eq(developmentReviews.id, review.id))
           .returning();
+        const needsHumanReason = input.needsHumanReason
+          ? developmentNeedsHumanReasonSchema.parse(input.needsHumanReason)
+          : undefined;
+        if (needsHumanReason) {
+          const [attempt] = await transaction
+            .select()
+            .from(developmentAttempts)
+            .where(eq(developmentAttempts.id, review.implementerAttemptId))
+            .limit(1)
+            .for("update");
+          if (!attempt?.fixIteration) {
+            throw new DevelopmentTransitionError("Only a fix-candidate review can require Phase 2C human action");
+          }
+          await transaction
+            .update(developmentTasks)
+            .set({
+              needsHumanReason,
+              status: "needs_human",
+              updatedAt: databaseNow
+            })
+            .where(eq(developmentTasks.id, review.taskId));
+        }
         await insertEvent(transaction, {
           createdAt: databaseNow,
           kind: "finalization",
           reviewId: review.id,
-          safeMetadata: { failure_class: review.failureClass ?? "interrupted" },
+          safeMetadata: {
+            failure_class: review.failureClass ?? "interrupted",
+            ...(needsHumanReason ? { needs_human_reason: needsHumanReason } : {})
+          },
           status: "failed"
         });
         return updated!;
@@ -401,7 +478,7 @@ export function createReviewRepositories(
       });
     },
 
-    getAuthoritativeReview: async (taskId: string, candidateCommit: string) => {
+    getCurrentAuthoritativeReview: async (taskId: string, candidateCommit: string) => {
       const [row] = await database
         .select({ attempt: developmentAttempts, review: developmentReviews, task: developmentTasks })
         .from(developmentReviews)
@@ -418,7 +495,6 @@ export function createReviewRepositories(
             eq(developmentAttempts.taskId, developmentTasks.id),
             eq(developmentAttempts.status, "succeeded"),
             eq(developmentTasks.baseCommit, developmentReviews.baseCommit),
-            eq(developmentAttempts.baseCommit, developmentReviews.baseCommit),
             eq(developmentAttempts.candidateCommit, developmentReviews.candidateCommit),
             eq(developmentAttempts.candidateRef, developmentReviews.candidateRef),
             isNull(developmentAttempts.failureClass),
@@ -448,7 +524,13 @@ export function createReviewRepositories(
       ) {
         return undefined;
       }
-      return review;
+      const [latest] = await database
+        .select({ id: developmentAttempts.id })
+        .from(developmentAttempts)
+        .where(eq(developmentAttempts.taskId, uuidSchema.parse(taskId)))
+        .orderBy(sql`${developmentAttempts.attemptNumber} desc`)
+        .limit(1);
+      return latest?.id === row?.attempt.id ? review : undefined;
     },
 
     getReview: async (id: string) => {
@@ -517,6 +599,63 @@ export function createReviewRepositories(
           reviewId: review.id,
           safeMetadata: { decision: result.decision, finding_count: result.findings.length, to_status: "finalizing" },
           status: "success"
+        });
+        return updated!;
+      });
+    },
+
+    prepareReviewInfrastructureRetry: async (input: {
+      failureClass: string;
+      leaseDurationMs: number;
+      leaseGeneration: number;
+      reviewId: string;
+      runnerId: string;
+    }) => {
+      const fence = fenceSchema.parse(input);
+      const failureClass = shortText.parse(input.failureClass);
+      return database.transaction(async (transaction) => {
+        const { databaseNow, review } = await lockedReview(transaction, fence);
+        const [attempt] = await transaction
+          .select()
+          .from(developmentAttempts)
+          .where(eq(developmentAttempts.id, review.implementerAttemptId))
+          .limit(1)
+          .for("update");
+        if (
+          !attempt?.fixIteration ||
+          review.decision ||
+          review.infrastructureRetryCount >= 2 ||
+          review.cleanupStatus !== "succeeded" ||
+          !["preparing", "reviewing", "interrupted"].includes(review.status)
+        ) {
+          throw new DevelopmentTransitionError("Reviewer infrastructure retry is not authorized");
+        }
+        const leaseGeneration = review.leaseGeneration + 1;
+        const [updated] = await transaction
+          .update(developmentReviews)
+          .set({
+            cleanupStatus: "pending",
+            failureClass: null,
+            infrastructureRetryCount: review.infrastructureRetryCount + 1,
+            leaseExpiresAt: leaseExpiry(databaseNow, input.leaseDurationMs),
+            leaseGeneration,
+            leaseOwner: input.runnerId,
+            status: "preparing",
+            updatedAt: databaseNow
+          })
+          .where(eq(developmentReviews.id, review.id))
+          .returning();
+        await insertEvent(transaction, {
+          createdAt: databaseNow,
+          kind: "transition",
+          reviewId: review.id,
+          safeMetadata: {
+            failure_class: failureClass,
+            infrastructure_retry_count: updated!.infrastructureRetryCount,
+            lease_generation: leaseGeneration,
+            to_status: "preparing"
+          },
+          status: "unknown"
         });
         return updated!;
       });
@@ -735,5 +874,9 @@ export function createReviewRepositories(
         return updated!;
       });
     }
+  };
+  return {
+    ...repositories,
+    getAuthoritativeReview: repositories.getCurrentAuthoritativeReview
   };
 }

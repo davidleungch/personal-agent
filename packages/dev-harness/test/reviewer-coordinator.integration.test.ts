@@ -595,7 +595,7 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     await expect(heartbeat.coordinator.runOne({ ...policy, leaseDurationMs: 900 })).rejects.toBeInstanceOf(DevelopmentLeaseError);
     expect(heartbeatHarness.executions).toHaveLength(1);
 
-    for (const kind of ["none", "duplicate"] as const) {
+    for (const kind of ["none", "duplicate", "malformed"] as const) {
       const fixture = await repositoryFixture();
       await candidateReady(fixture);
       const harness: DevelopmentHarness = {
@@ -607,6 +607,13 @@ describe("Phase 2B independent Reviewer coordinator", () => {
             if (kind === "duplicate") {
               yield { kind: "completed", result: "review_proposed", review: { decision: "APPROVE", findings: [] }, safeMetadata: {} };
               yield { kind: "completed", result: "review_proposed", review: { decision: "APPROVE", findings: [] }, safeMetadata: {} };
+            } else if (kind === "malformed") {
+              yield {
+                kind: "completed",
+                result: "review_proposed",
+                review: { decision: "REQUEST_CHANGES", findings: [] } as never,
+                safeMetadata: {}
+              };
             }
           })()
         })

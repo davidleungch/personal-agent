@@ -133,10 +133,38 @@ export class TrustedGit {
     const candidate = gitObjectIdSchema.parse(candidateCommit);
     const parent = await this.git(["rev-parse", `${candidate}^`]);
     validateCandidateRevision({ baseCommit: base, commit: candidate, parent });
+    return this.diffRange(base, candidate, maxOutputBytes);
+  }
+
+  async changedPaths(
+    baseCommit: string,
+    candidateCommit: string,
+    maxOutputBytes: number
+  ): Promise<string[]> {
+    const output = await this.git([
+      "diff",
+      "--name-only",
+      "-z",
+      gitObjectIdSchema.parse(baseCommit),
+      gitObjectIdSchema.parse(candidateCommit),
+      "--"
+    ], { maxOutputBytes, trimOutput: false });
+    return output.split("\0").filter(Boolean).map((path) => workspaceRelativePathSchema.parse(path));
+  }
+
+  async diffRange(baseCommit: string, candidateCommit: string, maxOutputBytes: number): Promise<string> {
+    const base = gitObjectIdSchema.parse(baseCommit);
+    const candidate = gitObjectIdSchema.parse(candidateCommit);
     return this.git(["diff", "--no-ext-diff", "--binary", base, candidate, "--"], {
       maxOutputBytes,
       trimOutput: false
     });
+  }
+
+  async treeId(commit: string): Promise<string> {
+    return gitObjectIdSchema.parse(
+      await this.git(["rev-parse", `${gitObjectIdSchema.parse(commit)}^{tree}`])
+    );
   }
 
   async assertWorkspaceClean(workspacePath: string, expectedCommit: string): Promise<void> {
@@ -246,7 +274,7 @@ export class TrustedGit {
         "commit",
         "--no-gpg-sign",
         "-m",
-        `Phase 2A candidate ${input.attemptId}`
+        `Development candidate ${input.attemptId}`
       ],
       { cwd: input.workspacePath }
     );

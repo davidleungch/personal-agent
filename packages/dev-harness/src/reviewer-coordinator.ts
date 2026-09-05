@@ -24,6 +24,12 @@ import { SandboxGateway, type SandboxManager, type SandboxWorkspace } from "./sa
 type ReviewPersistence = ReturnType<typeof createReviewRepositories>;
 type DevelopmentPersistence = ReturnType<typeof createDevelopmentRepositories>;
 
+class ReviewerInfrastructureError extends Error {
+  constructor(readonly failureClass: string) {
+    super(`Reviewer infrastructure failed: ${failureClass}`);
+  }
+}
+
 export type ReviewerRunPolicy = {
   budget: DevelopmentBudget;
   forbiddenPaths: readonly string[];
@@ -141,6 +147,7 @@ export class ReviewerCoordinator {
   private async failBeforeFinalization(input: {
     error: unknown;
     fence: { leaseGeneration: number; reviewId: string; runnerId: string };
+    needsHumanReason?: "infrastructure_retry_exhausted" | "reviewer_failure";
     workspace: SandboxWorkspace;
   }): Promise<never> {
     const failureClass =
@@ -162,13 +169,17 @@ export class ReviewerCoordinator {
     await this.cleanup(input.fence, input.workspace);
     await this.dependencies.persistence.completeReviewFailure({
       ...input.fence,
+      ...(input.needsHumanReason ? { needsHumanReason: input.needsHumanReason } : {}),
       now: new Date(),
       safeSummary: "Independent Reviewer attempt failed closed without an authoritative decision"
     });
     throw input.error;
   }
 
-  async runOne(policyInput: ReviewerRunPolicy) {
+  async runOne(
+    policyInput: ReviewerRunPolicy,
+    options: { taskId?: string } = {}
+  ): Promise<unknown> {
     const policy = {
       ...policyInput,
       budget: developmentBudgetSchema.parse(policyInput.budget),
@@ -184,7 +195,8 @@ export class ReviewerCoordinator {
       contextPolicy,
       leaseDurationMs: policy.leaseDurationMs,
       modelProfile: policy.modelProfile,
-      runnerId: this.dependencies.runnerId
+      runnerId: this.dependencies.runnerId,
+      ...(options.taskId ? { taskId: options.taskId } : {})
     });
     if (!claimed) return undefined;
 
@@ -230,7 +242,7 @@ export class ReviewerCoordinator {
     try {
       await this.verifyCandidateBinding({
         attemptId: attempt.id,
-        baseCommit: task.baseCommit,
+        baseCommit: attempt.baseCommit,
         candidateCommit: review.candidateCommit,
         candidateRef: review.candidateRef
       });
@@ -254,14 +266,18 @@ export class ReviewerCoordinator {
         review.candidateCommit
       );
       if (workspacePath !== workspace.path) throw new Error("Reviewer workspace identity changed");
-      await this.dependencies.sandboxManager.create({
-        sandboxId: review.sandboxId,
-        workspacePath
-      });
+      try {
+        await this.dependencies.sandboxManager.create({
+          sandboxId: review.sandboxId,
+          workspacePath
+        });
+      } catch {
+        throw new ReviewerInfrastructureError("sandbox");
+      }
       await this.dependencies.git.assertWorkspaceClean(workspace.path, review.candidateCommit);
       await this.verifyCandidateBinding({
         attemptId: attempt.id,
-        baseCommit: task.baseCommit,
+        baseCommit: attempt.baseCommit,
         candidateCommit: review.candidateCommit,
         candidateRef: review.candidateRef
       });
@@ -311,12 +327,16 @@ export class ReviewerCoordinator {
           });
         } else if (event.kind === "failed") {
           await appendEvent("harness", "failed", { failure_class: event.failureClass });
-          throw new Error(`Reviewer harness failed: ${event.failureClass}`);
+          throw new ReviewerInfrastructureError(event.failureClass);
         } else if (event.kind === "completed") {
           if (event.result !== "review_proposed" || proposal) {
-            throw new Error("Reviewer produced an invalid or duplicate result proposal");
+            throw new ReviewerInfrastructureError("malformed_output");
           }
-          proposal = developmentReviewResultSchema.parse(event.review);
+          try {
+            proposal = developmentReviewResultSchema.parse(event.review);
+          } catch {
+            throw new ReviewerInfrastructureError("malformed_output");
+          }
           await appendEvent("harness", "success", {
             decision: proposal.decision,
             finding_count: proposal.findings.length
@@ -327,14 +347,14 @@ export class ReviewerCoordinator {
           await appendEvent("harness", "started", event.safeMetadata);
         }
       }
-      if (!proposal) throw new Error("Reviewer ended without a strict result proposal");
+      if (!proposal) throw new ReviewerInfrastructureError("malformed_output");
       await this.dependencies.harness.abort(execution.executionId);
       executionId = undefined;
       ensureHeartbeat();
       await this.dependencies.git.assertWorkspaceClean(workspace.path, review.candidateCommit);
       await this.verifyCandidateBinding({
         attemptId: attempt.id,
-        baseCommit: task.baseCommit,
+        baseCommit: attempt.baseCommit,
         candidateCommit: review.candidateCommit,
         candidateRef: review.candidateRef
       });
@@ -359,7 +379,35 @@ export class ReviewerCoordinator {
       if (executionId) await this.dependencies.harness.abort(executionId).catch(() => undefined);
       clearInterval(heartbeat);
       heartbeatAbort.abort();
-      return this.failBeforeFinalization({ error, fence, workspace });
+      if (
+        attempt.fixIteration &&
+        error instanceof ReviewerInfrastructureError &&
+        review.infrastructureRetryCount < 2
+      ) {
+        await this.dependencies.persistence.recordReviewFailure({
+          ...fence,
+          failureClass: error.failureClass,
+          now: new Date()
+        });
+        await this.cleanup(fence, workspace);
+        await this.dependencies.persistence.prepareReviewInfrastructureRetry({
+          ...fence,
+          failureClass: error.failureClass,
+          leaseDurationMs: policy.leaseDurationMs
+        });
+        return this.runOne(policy, { taskId: task.id });
+      }
+      const needsHumanReason = attempt.fixIteration
+        ? error instanceof ReviewerInfrastructureError
+          ? "infrastructure_retry_exhausted" as const
+          : "reviewer_failure" as const
+        : undefined;
+      return this.failBeforeFinalization({
+        error,
+        fence,
+        ...(needsHumanReason ? { needsHumanReason } : {}),
+        workspace
+      });
     }
 
     clearInterval(heartbeat);
@@ -435,6 +483,34 @@ export class ReviewerCoordinator {
     }
     if (review.cleanupStatus !== "succeeded") {
       await this.cleanup(fence, workspace);
+    }
+
+    if (review.status === "interrupted" && !review.decision) {
+      const durable = await this.dependencies.persistence.getReviewContextInput(review.id);
+      if (durable?.attempt.fixIteration && review.infrastructureRetryCount < 2) {
+        await this.dependencies.persistence.prepareReviewInfrastructureRetry({
+          ...fence,
+          failureClass: review.failureClass!,
+          leaseDurationMs
+        });
+        const contextPolicy = developmentReviewerContextPolicySchema.parse(review.contextPolicy);
+        return this.runOne({
+          budget: developmentBudgetSchema.parse(review.budget),
+          forbiddenPaths: contextPolicy.forbiddenPaths,
+          leaseDurationMs,
+          modelProfile: modelProfileSchema.parse(review.modelProfile),
+          readablePaths: contextPolicy.readablePaths,
+          relevantPaths: contextPolicy.relevantPaths
+        }, { taskId: review.taskId });
+      }
+      return this.dependencies.persistence.completeReviewFailure({
+        ...fence,
+        ...(durable?.attempt.fixIteration
+          ? { needsHumanReason: "infrastructure_retry_exhausted" }
+          : {}),
+        now: new Date(),
+        safeSummary: "Interrupted independent Reviewer was reconstructed without session authority"
+      });
     }
 
     if (recoverableProposal) {

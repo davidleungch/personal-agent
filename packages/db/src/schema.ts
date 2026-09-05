@@ -2,6 +2,7 @@ import type {
   DevelopmentAcceptanceCriteria,
   DevelopmentBudget,
   DevelopmentContextManifest,
+  DevelopmentImplementerContextPolicy,
   DevelopmentReviewerContextManifest,
   DevelopmentReviewerContextPolicy,
   DevelopmentReviewFinding,
@@ -21,7 +22,8 @@ import {
   timestamp,
   unique,
   uniqueIndex,
-  uuid
+  uuid,
+  type AnyPgColumn
 } from "drizzle-orm/pg-core";
 
 const timestampColumn = (name: string) => timestamp(name, { mode: "date", withTimezone: true });
@@ -326,22 +328,25 @@ export const developmentTasks = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<DevelopmentAcceptanceCriteria>().notNull(),
     status: text().notNull(),
     baseCommit: text("base_commit").notNull(),
-    maxAttempts: integer("max_attempts").default(1).notNull(),
     approvedAt: timestampColumn("approved_at").notNull(),
     authorityInvalidatedAt: timestampColumn("authority_invalidated_at"),
+    needsHumanReason: text("needs_human_reason"),
     createdAt: timestampColumn("created_at").defaultNow().notNull(),
     updatedAt: timestampColumn("updated_at").defaultNow().notNull()
   },
   (table) => [
     check(
       "development_tasks_status_check",
-      sql`${table.status} in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'blocked', 'failed', 'cancelled')`
+      sql`${table.status} in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'fix_required', 'approved_candidate', 'needs_human', 'blocked', 'failed', 'cancelled')`
     ),
     check(
       "development_tasks_base_commit_check",
       sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
     ),
-    check("development_tasks_max_attempts_check", sql`${table.maxAttempts} = 1`),
+    check(
+      "development_tasks_needs_human_reason_check",
+      sql`((${table.status} = 'needs_human') = (${table.needsHumanReason} is not null)) and (${table.needsHumanReason} is null or ${table.needsHumanReason} in ('acceptance_ambiguity', 'authority_change_required', 'scope_expansion_required', 'architecture_conflict', 'security_boundary_change', 'consequential_approval_required', 'authority_invalidated', 'candidate_binding_invalid', 'context_unavailable', 'policy_missing', 'execution_budget_exhausted', 'fix_iteration_exhausted', 'infrastructure_retry_exhausted', 'deterministic_test_failure', 'reviewer_failure', 'non_convergence', 'durable_integrity_failure', 'minor_only_rejection'))`
+    ),
     check(
       "development_tasks_acceptance_criteria_array_check",
       sql`jsonb_typeof(${table.acceptanceCriteria}) = 'array' and jsonb_array_length(${table.acceptanceCriteria}) > 0`
@@ -363,9 +368,17 @@ export const developmentAttempts = pgTable(
     harnessAdapter: text("harness_adapter").notNull(),
     modelProfile: text("model_profile").notNull(),
     baseCommit: text("base_commit").notNull(),
+    parentCandidateCommit: text("parent_candidate_commit"),
+    sourceReviewId: uuid("source_review_id").references(
+      (): AnyPgColumn => developmentReviews.id,
+      { onDelete: "restrict", onUpdate: "restrict" }
+    ),
+    fixIteration: integer("fix_iteration"),
+    infrastructureRetryCount: integer("infrastructure_retry_count").default(0).notNull(),
     candidateCommit: text("candidate_commit"),
     candidateRef: text("candidate_ref"),
     sandboxId: text("sandbox_id").notNull(),
+    contextPolicy: jsonb("context_policy").$type<DevelopmentImplementerContextPolicy>(),
     contextManifest: jsonb("context_manifest").$type<DevelopmentContextManifest>(),
     contextDigest: text("context_digest"),
     budget: jsonb().$type<DevelopmentBudget>().notNull(),
@@ -382,7 +395,15 @@ export const developmentAttempts = pgTable(
   },
   (table) => [
     unique("development_attempts_task_number_unique").on(table.taskId, table.attemptNumber),
-    check("development_attempts_number_check", sql`${table.attemptNumber} = 1`),
+    unique("development_attempts_source_review_unique").on(table.sourceReviewId),
+    unique("development_attempts_task_fix_iteration_unique").on(table.taskId, table.fixIteration),
+    uniqueIndex("development_attempts_initial_task_uidx")
+      .on(table.taskId)
+      .where(sql`${table.fixIteration} is null`),
+    uniqueIndex("development_attempts_one_active_task_uidx")
+      .on(table.taskId)
+      .where(sql`${table.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'interrupted')`),
+    check("development_attempts_number_check", sql`${table.attemptNumber} between 1 and 4`),
     check("development_attempts_role_check", sql`${table.role} = 'implementer'`),
     check(
       "development_attempts_status_check",
@@ -398,6 +419,18 @@ export const developmentAttempts = pgTable(
       sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
     ),
     check(
+      "development_attempts_parent_candidate_check",
+      sql`${table.parentCandidateCommit} is null or ${table.parentCandidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
+    ),
+    check(
+      "development_attempts_fix_lineage_check",
+      sql`(${table.fixIteration} is null and ${table.sourceReviewId} is null and ${table.parentCandidateCommit} is null and ${table.attemptNumber} = 1) or (${table.fixIteration} between 1 and 3 and ${table.sourceReviewId} is not null and ${table.parentCandidateCommit} is not null and ${table.attemptNumber} = ${table.fixIteration} + 1)`
+    ),
+    check(
+      "development_attempts_infrastructure_retry_check",
+      sql`${table.infrastructureRetryCount} between 0 and 2`
+    ),
+    check(
       "development_attempts_candidate_commit_check",
       sql`${table.candidateCommit} is null or ${table.candidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`
     ),
@@ -408,6 +441,10 @@ export const developmentAttempts = pgTable(
     check(
       "development_attempts_succeeded_candidate_check",
       sql`(${table.status} = 'succeeded') = (${table.candidateCommit} is not null)`
+    ),
+    check(
+      "development_attempts_context_policy_check",
+      sql`(${table.fixIteration} is null) or (${table.contextPolicy} is not null and jsonb_typeof(${table.contextPolicy}) = 'object')`
     ),
     check(
       "development_attempts_context_pair_check",
@@ -462,6 +499,7 @@ export const developmentReviews = pgTable(
     contextPolicy: jsonb("context_policy").$type<DevelopmentReviewerContextPolicy>().notNull(),
     budget: jsonb().$type<DevelopmentBudget>().notNull(),
     usage: jsonb().$type<DevelopmentUsage>().notNull(),
+    infrastructureRetryCount: integer("infrastructure_retry_count").default(0).notNull(),
     leaseOwner: text("lease_owner").notNull(),
     leaseExpiresAt: timestampColumn("lease_expires_at").notNull(),
     leaseGeneration: integer("lease_generation").default(1).notNull(),
@@ -477,7 +515,6 @@ export const developmentReviews = pgTable(
     updatedAt: timestampColumn("updated_at").defaultNow().notNull()
   },
   (table) => [
-    unique("development_reviews_task_unique").on(table.taskId),
     unique("development_reviews_implementer_attempt_unique").on(table.implementerAttemptId),
     check("development_reviews_role_check", sql`${table.role} = 'reviewer'`),
     check(
@@ -540,6 +577,10 @@ export const developmentReviews = pgTable(
       sql`${table.cleanupStatus} in ('pending', 'failed', 'succeeded')`
     ),
     check("development_reviews_lease_generation_check", sql`${table.leaseGeneration} > 0`),
+    check(
+      "development_reviews_infrastructure_retry_check",
+      sql`${table.infrastructureRetryCount} between 0 and 2`
+    ),
     check(
       "development_reviews_completion_check",
       sql`(${table.status} in ('succeeded', 'failed') and ${table.completedAt} is not null) or (${table.status} not in ('succeeded', 'failed') and ${table.completedAt} is null)`

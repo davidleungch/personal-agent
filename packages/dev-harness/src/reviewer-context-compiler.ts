@@ -125,7 +125,20 @@ export class ReviewerContextCompiler {
     const acceptanceCriteria = developmentAcceptanceCriteriaSchema.parse(input.acceptanceCriteria);
     const contextPolicy = developmentReviewerContextPolicySchema.parse(input.contextPolicy);
     const modelProfile = modelProfileSchema.parse(input.modelProfile);
-    const { forbiddenPaths, readablePaths, relevantPaths } = contextPolicy;
+    const { forbiddenPaths, readablePaths } = contextPolicy;
+    const changedPaths = await this.git.changedPaths(
+      baseCommit,
+      candidateCommit,
+      budget.maxDiffBytes
+    );
+    const relevantPaths = z.array(workspaceRelativePathSchema).max(64).parse([
+      ...new Set([
+        ...contextPolicy.relevantPaths,
+        ...changedPaths.filter(
+          (path) => inScope(path, readablePaths) && !inScope(path, forbiddenPaths)
+        )
+      ])
+    ]);
     for (const path of relevantPaths) {
       if (!inScope(path, readablePaths) || inScope(path, forbiddenPaths)) {
         throw new Error(`Reviewer context path is outside the approved read scope: ${path}`);
@@ -166,7 +179,7 @@ export class ReviewerContextCompiler {
       entries.push({ blobId: blob.blobId, bytes, path, source: "repository" });
     }
 
-    const candidateDiff = await this.git.diffCommits(
+    const candidateDiff = await this.git.diffRange(
       baseCommit,
       candidateCommit,
       budget.maxDiffBytes

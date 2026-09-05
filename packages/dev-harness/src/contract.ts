@@ -7,6 +7,8 @@ import {
   modelProfileSchema,
   type DevelopmentBudget,
   type DevelopmentContextManifest,
+  type DevelopmentNeedsHumanReason,
+  type DevelopmentReviewFinding,
   type DevelopmentReviewResult,
   type DevelopmentRole,
   type DevelopmentUsage,
@@ -25,7 +27,8 @@ export const developmentToolNameSchema = z.enum([
   "git.status",
   "git.diff",
   "review.run_check",
-  "review.submit"
+  "review.submit",
+  "fix.submit"
 ]);
 export type DevelopmentToolName = z.infer<typeof developmentToolNameSchema>;
 
@@ -38,6 +41,11 @@ export const implementerToolNames = [
   "sandbox.exec",
   "git.status",
   "git.diff"
+] as const satisfies readonly DevelopmentToolName[];
+
+export const fixImplementerToolNames = [
+  ...implementerToolNames,
+  "fix.submit"
 ] as const satisfies readonly DevelopmentToolName[];
 
 export const reviewerToolNames = [
@@ -66,6 +74,12 @@ export type DevelopmentContext = {
   budget: DevelopmentBudget;
   digest: string;
   forbiddenPaths: readonly string[];
+  fix?: {
+    findings: readonly DevelopmentReviewFinding[];
+    iteration: number;
+    rejectedCandidateCommit: string;
+    sourceReviewId: string;
+  };
   manifest: DevelopmentContextManifest;
   remainingBudget: DevelopmentBudget;
   role: DevelopmentRole;
@@ -113,6 +127,12 @@ export type DevelopmentEvent =
       kind: "completed";
       result: "review_proposed";
       review: DevelopmentReviewResult;
+      safeMetadata: JsonObject;
+    }
+  | {
+      kind: "completed";
+      reason: DevelopmentNeedsHumanReason;
+      result: "needs_human_proposed";
       safeMetadata: JsonObject;
     }
   | {

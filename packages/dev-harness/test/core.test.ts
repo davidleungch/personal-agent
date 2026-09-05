@@ -209,6 +209,16 @@ describe("Reviewer Context Compiler", () => {
     expect(context).toMatchObject({ candidateCommit: candidate, role: "reviewer" });
     expect(context.candidateDiff).toContain("candidate");
     expect(context.manifest.entries.filter((entry) => entry.path === "src/relevant.ts")).toHaveLength(1);
+    await expect(compiler.compile({
+      ...input,
+      contextPolicy: { ...input.contextPolicy, relevantPaths: [] }
+    })).resolves.toMatchObject({
+      manifest: {
+        entries: expect.arrayContaining([
+          expect.objectContaining({ path: "src/relevant.ts", source: "repository" })
+        ])
+      }
+    });
     const reviewerManifest = context.manifest as typeof context.manifest & {
       authorityReferences: string[];
     };
@@ -324,6 +334,45 @@ describe("Development Context Compiler", () => {
     expect(context.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(context.remainingBudget.maxModelInvocations).toBe(2);
     expect(context.acceptanceCriteria).toContain("Tests pass");
+  });
+
+  it("uses original authority and the exact rejected candidate for fix context", async () => {
+    const fixture = await fixtureRepository();
+    await writeFile(join(fixture.path, "AGENTS.md"), "candidate must not become authority");
+    await writeFile(join(fixture.path, "src/relevant.ts"), "export const relevant = 'rejected';\n");
+    execFileSync("git", ["add", "."], { cwd: fixture.path });
+    execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-q", "-m", "rejected"], { cwd: fixture.path });
+    const rejected = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture.path, encoding: "utf8" }).trim();
+    const compiler = new DevelopmentContextCompiler(new TrustedGit(fixture.path, fixture.workspaces));
+    const context = await compiler.compile({
+      acceptanceCriteria,
+      allowedPaths: ["src"],
+      authorityBaseCommit: fixture.commit,
+      baseCommit: rejected,
+      budget,
+      fix: {
+        findings: [{
+          acceptanceCriterionId: "tests",
+          architectureReference: "docs/design.md#design",
+          category: "correctness",
+          finding: "Rejected behavior.",
+          relevantPath: "src/relevant.ts",
+          requiredCorrection: "Correct it.",
+          severity: "high"
+        }],
+        iteration: 1,
+        sourceReviewId: "00000000-0000-4000-8000-000000000001"
+      },
+      forbiddenPaths: ["docs"],
+      relevantPaths: ["src/relevant.ts"],
+      specification: "Correct relevant.ts",
+      taskTitle: "Fix relevant change",
+      usage
+    });
+    expect(context.sections.find((section) => section.path === "AGENTS.md")?.content).toBe("agents");
+    expect(context.sections.find((section) => section.path === "src/relevant.ts")?.content).toContain("rejected");
+    expect(context.candidateDiff).toContain("rejected");
+    expect(context.fix).toMatchObject({ iteration: 1, rejectedCandidateCommit: rejected });
   });
 
   it("rejects source and task metadata over the context limit", async () => {

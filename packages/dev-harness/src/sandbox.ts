@@ -13,6 +13,7 @@ import {
 import { z } from "zod";
 import {
   developmentToolNameSchema,
+  fixImplementerToolNames,
   implementerToolNames,
   reviewerToolNames,
   type DevelopmentToolName,
@@ -253,6 +254,7 @@ export class SandboxGateway implements DevelopmentToolSet {
       baseCommit?: string;
       budget: DevelopmentBudget;
       candidateCommit?: string;
+      fix?: boolean;
       forbiddenPaths: readonly string[];
       git: TrustedGit;
       knownSecrets?: readonly string[];
@@ -269,7 +271,11 @@ export class SandboxGateway implements DevelopmentToolSet {
   ) {
     this.root = resolve(input.workspace.path);
     this.role = input.role ?? "implementer";
-    this.names = this.role === "reviewer" ? reviewerToolNames : implementerToolNames;
+    this.names = this.role === "reviewer"
+      ? reviewerToolNames
+      : input.fix
+        ? fixImplementerToolNames
+        : implementerToolNames;
     this.approvedChecks = this.role === "reviewer"
       ? developmentAcceptanceCriteriaSchema.parse(input.approvedChecks)
       : [];
@@ -503,6 +509,9 @@ export class SandboxGateway implements DevelopmentToolSet {
     }
     if (tool === "review.submit") {
       throw new Error("Reviewer result submission is owned by the Pi adapter");
+    }
+    if (tool === "fix.submit") {
+      throw new Error("Fix result submission is owned by the Pi adapter");
     }
     if (tool === "sandbox.write") {
       const input = writeInputSchema.parse(rawInput);

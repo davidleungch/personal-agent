@@ -91,6 +91,9 @@ export const developmentTaskStatusSchema = z.enum([
   "implementing",
   "testing",
   "candidate_ready",
+  "fix_required",
+  "approved_candidate",
+  "needs_human",
   "blocked",
   "failed",
   "cancelled"
@@ -175,6 +178,17 @@ export const developmentScopedPathSchema = z.union([
   workspaceRelativePathSchema
 ]);
 
+export const developmentImplementerContextPolicySchema = z
+  .object({
+    allowedPaths: z.array(developmentScopedPathSchema).min(1).max(64),
+    forbiddenPaths: z.array(developmentScopedPathSchema).max(64),
+    relevantPaths: z.array(workspaceRelativePathSchema).max(64)
+  })
+  .strict();
+export type DevelopmentImplementerContextPolicy = z.infer<
+  typeof developmentImplementerContextPolicySchema
+>;
+
 export const developmentReviewerContextPolicySchema = z
   .object({
     forbiddenPaths: z.array(developmentScopedPathSchema).max(64),
@@ -252,6 +266,30 @@ export const developmentReviewFindingSchema = z
   })
   .strict();
 export type DevelopmentReviewFinding = z.infer<typeof developmentReviewFindingSchema>;
+
+export const developmentNeedsHumanReasonSchema = z.enum([
+  "acceptance_ambiguity",
+  "authority_change_required",
+  "scope_expansion_required",
+  "architecture_conflict",
+  "security_boundary_change",
+  "consequential_approval_required",
+  "authority_invalidated",
+  "candidate_binding_invalid",
+  "context_unavailable",
+  "policy_missing",
+  "execution_budget_exhausted",
+  "fix_iteration_exhausted",
+  "infrastructure_retry_exhausted",
+  "deterministic_test_failure",
+  "reviewer_failure",
+  "non_convergence",
+  "durable_integrity_failure",
+  "minor_only_rejection"
+]);
+export type DevelopmentNeedsHumanReason = z.infer<
+  typeof developmentNeedsHumanReasonSchema
+>;
 
 export const developmentReviewResultSchema = z.discriminatedUnion("decision", [
   z
@@ -344,14 +382,17 @@ export type DevelopmentReviewerContextManifest = z.infer<
 const developmentTaskTransitions: Readonly<
   Record<DevelopmentTaskStatus, readonly DevelopmentTaskStatus[]>
 > = {
+  approved_candidate: [],
   blocked: [],
   cancelled: [],
-  candidate_ready: [],
+  candidate_ready: ["approved_candidate", "fix_required", "needs_human", "blocked"],
   failed: [],
-  implementing: ["testing", "blocked", "failed", "cancelled"],
-  preparing: ["implementing", "blocked", "failed", "cancelled"],
+  fix_required: ["preparing", "needs_human", "blocked", "cancelled"],
+  implementing: ["testing", "preparing", "needs_human", "blocked", "failed", "cancelled"],
+  needs_human: [],
+  preparing: ["implementing", "needs_human", "blocked", "failed", "cancelled"],
   ready: ["preparing", "blocked", "cancelled"],
-  testing: ["candidate_ready", "blocked", "failed", "cancelled"]
+  testing: ["candidate_ready", "preparing", "needs_human", "blocked", "failed", "cancelled"]
 };
 
 const developmentAttemptTransitions: Readonly<

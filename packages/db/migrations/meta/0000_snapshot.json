@@ -1,5 +1,5 @@
 {
-  "id": "682b4aaf-10f7-4d4c-bfb0-cb8f65875153",
+  "id": "0feb826a-818b-4bbb-8364-1946432dd797",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -677,6 +677,31 @@
           "primaryKey": false,
           "notNull": true
         },
+        "parent_candidate_commit": {
+          "name": "parent_candidate_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_review_id": {
+          "name": "source_review_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fix_iteration": {
+          "name": "fix_iteration",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "infrastructure_retry_count": {
+          "name": "infrastructure_retry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "candidate_commit": {
           "name": "candidate_commit",
           "type": "text",
@@ -694,6 +719,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "context_policy": {
+          "name": "context_policy",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "context_manifest": {
           "name": "context_manifest",
@@ -778,6 +809,38 @@
         }
       },
       "indexes": {
+        "development_attempts_initial_task_uidx": {
+          "name": "development_attempts_initial_task_uidx",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"development_attempts\".\"fix_iteration\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "development_attempts_one_active_task_uidx": {
+          "name": "development_attempts_one_active_task_uidx",
+          "columns": [
+            {
+              "expression": "task_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"development_attempts\".\"status\" in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'interrupted')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "development_attempts_lease_idx": {
           "name": "development_attempts_lease_idx",
           "columns": [
@@ -808,6 +871,19 @@
           ],
           "onDelete": "restrict",
           "onUpdate": "restrict"
+        },
+        "development_attempts_source_review_id_development_reviews_id_fk": {
+          "name": "development_attempts_source_review_id_development_reviews_id_fk",
+          "tableFrom": "development_attempts",
+          "tableTo": "development_reviews",
+          "columnsFrom": [
+            "source_review_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -819,13 +895,28 @@
             "task_id",
             "attempt_number"
           ]
+        },
+        "development_attempts_source_review_unique": {
+          "name": "development_attempts_source_review_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "source_review_id"
+          ]
+        },
+        "development_attempts_task_fix_iteration_unique": {
+          "name": "development_attempts_task_fix_iteration_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "task_id",
+            "fix_iteration"
+          ]
         }
       },
       "policies": {},
       "checkConstraints": {
         "development_attempts_number_check": {
           "name": "development_attempts_number_check",
-          "value": "\"development_attempts\".\"attempt_number\" = 1"
+          "value": "\"development_attempts\".\"attempt_number\" between 1 and 4"
         },
         "development_attempts_role_check": {
           "name": "development_attempts_role_check",
@@ -847,6 +938,18 @@
           "name": "development_attempts_base_commit_check",
           "value": "\"development_attempts\".\"base_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
         },
+        "development_attempts_parent_candidate_check": {
+          "name": "development_attempts_parent_candidate_check",
+          "value": "\"development_attempts\".\"parent_candidate_commit\" is null or \"development_attempts\".\"parent_candidate_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
+        },
+        "development_attempts_fix_lineage_check": {
+          "name": "development_attempts_fix_lineage_check",
+          "value": "(\"development_attempts\".\"fix_iteration\" is null and \"development_attempts\".\"source_review_id\" is null and \"development_attempts\".\"parent_candidate_commit\" is null and \"development_attempts\".\"attempt_number\" = 1) or (\"development_attempts\".\"fix_iteration\" between 1 and 3 and \"development_attempts\".\"source_review_id\" is not null and \"development_attempts\".\"parent_candidate_commit\" is not null and \"development_attempts\".\"attempt_number\" = \"development_attempts\".\"fix_iteration\" + 1)"
+        },
+        "development_attempts_infrastructure_retry_check": {
+          "name": "development_attempts_infrastructure_retry_check",
+          "value": "\"development_attempts\".\"infrastructure_retry_count\" between 0 and 2"
+        },
         "development_attempts_candidate_commit_check": {
           "name": "development_attempts_candidate_commit_check",
           "value": "\"development_attempts\".\"candidate_commit\" is null or \"development_attempts\".\"candidate_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
@@ -858,6 +961,10 @@
         "development_attempts_succeeded_candidate_check": {
           "name": "development_attempts_succeeded_candidate_check",
           "value": "(\"development_attempts\".\"status\" = 'succeeded') = (\"development_attempts\".\"candidate_commit\" is not null)"
+        },
+        "development_attempts_context_policy_check": {
+          "name": "development_attempts_context_policy_check",
+          "value": "(\"development_attempts\".\"fix_iteration\" is null) or (\"development_attempts\".\"context_policy\" is not null and jsonb_typeof(\"development_attempts\".\"context_policy\") = 'object')"
         },
         "development_attempts_context_pair_check": {
           "name": "development_attempts_context_pair_check",
@@ -1097,6 +1204,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "infrastructure_retry_count": {
+          "name": "infrastructure_retry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
         "lease_owner": {
           "name": "lease_owner",
           "type": "text",
@@ -1234,13 +1348,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
-        "development_reviews_task_unique": {
-          "name": "development_reviews_task_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "task_id"
-          ]
-        },
         "development_reviews_implementer_attempt_unique": {
           "name": "development_reviews_implementer_attempt_unique",
           "nullsNotDistinct": false,
@@ -1327,6 +1434,10 @@
           "name": "development_reviews_lease_generation_check",
           "value": "\"development_reviews\".\"lease_generation\" > 0"
         },
+        "development_reviews_infrastructure_retry_check": {
+          "name": "development_reviews_infrastructure_retry_check",
+          "value": "\"development_reviews\".\"infrastructure_retry_count\" between 0 and 2"
+        },
         "development_reviews_completion_check": {
           "name": "development_reviews_completion_check",
           "value": "(\"development_reviews\".\"status\" in ('succeeded', 'failed') and \"development_reviews\".\"completed_at\" is not null) or (\"development_reviews\".\"status\" not in ('succeeded', 'failed') and \"development_reviews\".\"completed_at\" is null)"
@@ -1382,13 +1493,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
         "approved_at": {
           "name": "approved_at",
           "type": "timestamp with time zone",
@@ -1398,6 +1502,12 @@
         "authority_invalidated_at": {
           "name": "authority_invalidated_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "needs_human_reason": {
+          "name": "needs_human_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -1446,15 +1556,15 @@
       "checkConstraints": {
         "development_tasks_status_check": {
           "name": "development_tasks_status_check",
-          "value": "\"development_tasks\".\"status\" in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'blocked', 'failed', 'cancelled')"
+          "value": "\"development_tasks\".\"status\" in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'fix_required', 'approved_candidate', 'needs_human', 'blocked', 'failed', 'cancelled')"
         },
         "development_tasks_base_commit_check": {
           "name": "development_tasks_base_commit_check",
           "value": "\"development_tasks\".\"base_commit\" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'"
         },
-        "development_tasks_max_attempts_check": {
-          "name": "development_tasks_max_attempts_check",
-          "value": "\"development_tasks\".\"max_attempts\" = 1"
+        "development_tasks_needs_human_reason_check": {
+          "name": "development_tasks_needs_human_reason_check",
+          "value": "((\"development_tasks\".\"status\" = 'needs_human') = (\"development_tasks\".\"needs_human_reason\" is not null)) and (\"development_tasks\".\"needs_human_reason\" is null or \"development_tasks\".\"needs_human_reason\" in ('acceptance_ambiguity', 'authority_change_required', 'scope_expansion_required', 'architecture_conflict', 'security_boundary_change', 'consequential_approval_required', 'authority_invalidated', 'candidate_binding_invalid', 'context_unavailable', 'policy_missing', 'execution_budget_exhausted', 'fix_iteration_exhausted', 'infrastructure_retry_exhausted', 'deterministic_test_failure', 'reviewer_failure', 'non_convergence', 'durable_integrity_failure', 'minor_only_rejection'))"
         },
         "development_tasks_acceptance_criteria_array_check": {
           "name": "development_tasks_acceptance_criteria_array_check",

@@ -3,6 +3,7 @@ import {
   developmentAcceptanceCriteriaSchema,
   developmentBudgetSchema,
   developmentContextManifestSchema,
+  developmentReviewFindingSchema,
   developmentUsageSchema,
   gitObjectIdSchema,
   workspaceRelativePathSchema,
@@ -48,8 +49,14 @@ export class DevelopmentContextCompiler {
   async compile(input: {
     acceptanceCriteria: unknown;
     allowedPaths: readonly string[];
+    authorityBaseCommit?: string;
     baseCommit: string;
     budget: unknown;
+    fix?: {
+      findings: unknown;
+      iteration: number;
+      sourceReviewId: string;
+    };
     forbiddenPaths: readonly string[];
     relevantPaths: readonly string[];
     specification: string;
@@ -57,6 +64,7 @@ export class DevelopmentContextCompiler {
     usage: unknown;
   }): Promise<DevelopmentContext> {
     const baseCommit = gitObjectIdSchema.parse(input.baseCommit);
+    const authorityBaseCommit = gitObjectIdSchema.parse(input.authorityBaseCommit ?? baseCommit);
     const budget = developmentBudgetSchema.parse(input.budget);
     const usage = developmentUsageSchema.parse(input.usage);
     const acceptanceCriteria = developmentAcceptanceCriteriaSchema.parse(input.acceptanceCriteria);
@@ -66,27 +74,47 @@ export class DevelopmentContextCompiler {
       .array(workspaceRelativePathSchema)
       .max(64)
       .parse(input.relevantPaths);
+    const fix = input.fix
+      ? {
+          findings: z.array(developmentReviewFindingSchema).min(1).max(64).parse(input.fix.findings),
+          iteration: z.number().int().min(1).max(3).parse(input.fix.iteration),
+          rejectedCandidateCommit: baseCommit,
+          sourceReviewId: z.string().uuid().parse(input.fix.sourceReviewId)
+        }
+      : undefined;
     const selectedPaths = [...new Set([...authorityPaths, ...relevantPaths])];
     const sections: DevelopmentContextSection[] = [];
     const entries = [];
     let totalBytes = 0;
 
     for (const path of selectedPaths) {
-      const blob = await this.git.readBlob(baseCommit, path);
+      const source = authorityPaths.includes(path as (typeof authorityPaths)[number])
+        ? "authority"
+        : "repository";
+      const blob = await this.git.readBlob(
+        source === "authority" ? authorityBaseCommit : baseCommit,
+        path
+      );
       const bytes = Buffer.byteLength(blob.content);
       totalBytes += bytes;
       if (totalBytes > budget.maxContextBytes) {
         throw new Error("Compiled development context exceeds the approved byte budget");
       }
-      const source = authorityPaths.includes(path as (typeof authorityPaths)[number])
-        ? "authority"
-        : "repository";
       sections.push({ content: blob.content, path, source });
       entries.push({ blobId: blob.blobId, bytes, path, source });
     }
 
     const acceptanceCriteriaText = JSON.stringify(acceptanceCriteria);
-    const metadataBytes = Buffer.byteLength(input.taskTitle + input.specification + acceptanceCriteriaText);
+    const candidateDiff = fix
+      ? await this.git.diffRange(authorityBaseCommit, baseCommit, budget.maxDiffBytes)
+      : undefined;
+    const metadataBytes = Buffer.byteLength(
+      input.taskTitle +
+        input.specification +
+        acceptanceCriteriaText +
+        JSON.stringify(fix ?? {}) +
+        (candidateDiff ?? "")
+    );
     if (totalBytes + metadataBytes > budget.maxContextBytes) {
       throw new Error("Task metadata and selected files exceed the approved context byte budget");
     }
@@ -96,14 +124,15 @@ export class DevelopmentContextCompiler {
         JSON.stringify({
           acceptanceCriteria,
           allowedPaths,
+          authorityBaseCommit,
           baseCommit,
           budget,
+          fix,
           forbiddenPaths,
           manifest,
           role: "implementer",
           specification: input.specification,
-          taskTitle: input.taskTitle,
-          usage
+          taskTitle: input.taskTitle
         })
       )
       .digest("hex");
@@ -113,7 +142,9 @@ export class DevelopmentContextCompiler {
       allowedPaths,
       baseCommit,
       budget,
+      ...(candidateDiff ? { candidateDiff } : {}),
       digest,
+      ...(fix ? { fix } : {}),
       forbiddenPaths,
       manifest,
       remainingBudget: remainingBudget(budget, usage),

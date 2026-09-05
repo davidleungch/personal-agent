@@ -73,7 +73,8 @@ describe("Phase 2A development persistence", () => {
       baseCommit: commit,
       title: "Bounded fixture"
     });
-    expect(task).toMatchObject({ maxAttempts: 1, status: "ready" });
+    expect(task).toMatchObject({ status: "ready" });
+    expect(task).not.toHaveProperty("maxAttempts");
     await expect(repositories.getDevelopmentTask(task.id)).resolves.toEqual(task);
     await expect(repositories.getDevelopmentTask(randomUUID())).resolves.toBeUndefined();
 
@@ -327,6 +328,10 @@ describe("Phase 2A development persistence", () => {
       })
     ).rejects.toThrow("Unsafe durable metadata");
 
+    await pool.query(
+      "update development_attempts set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1",
+      [claim.attempt.id]
+    );
     const reclaimed = await repositories.reclaimExpiredDevelopmentAttempt({
       leaseDurationMs: 1_000,
       now: new Date("2026-08-27T01:00:02.000Z"),

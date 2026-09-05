@@ -10,6 +10,8 @@ import {
   developmentBudgetSchema,
   developmentContextManifestSchema,
   developmentEventStatusSchema,
+  developmentImplementerContextPolicySchema,
+  developmentNeedsHumanReasonSchema,
   developmentTaskStatusSchema,
   developmentUsageSchema,
   emptyDevelopmentUsage,
@@ -24,12 +26,13 @@ import {
   type JsonObject,
   type JsonValue
 } from "@personal-agent/shared";
-import { and, asc, eq, lte, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "./database.js";
 import {
   developmentAttemptEvents,
   developmentAttempts,
+  developmentReviews,
   developmentTasks
 } from "./schema.js";
 
@@ -40,8 +43,17 @@ export class DevelopmentLeaseError extends Error {}
 export class DevelopmentTransitionError extends Error {}
 export class DevelopmentBudgetError extends Error {}
 
+type DevelopmentTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
+
 function leaseExpiry(now: Date, durationMs: number): Date {
   return new Date(now.getTime() + positiveDurationSchema.parse(durationMs));
+}
+
+async function freshDatabaseTime(transaction: DevelopmentTransaction): Promise<Date> {
+  const result = await transaction.execute<{ databaseNow: Date }>(
+    sql`select clock_timestamp() as "databaseNow"`
+  );
+  return z.coerce.date().parse(result.rows[0]?.databaseNow);
 }
 
 function usageWithinBudget(usage: DevelopmentUsage, budget: DevelopmentBudget): boolean {
@@ -97,7 +109,8 @@ export function createDevelopmentRepositories(
     leaseDurationMs: positiveDurationSchema,
     modelProfile: modelProfileSchema,
     now: z.date(),
-    runnerId: shortText
+    runnerId: shortText,
+    taskId: uuidSchema.optional()
   });
 
   const fenceSchema = z.object({
@@ -118,16 +131,17 @@ export function createDevelopmentRepositories(
       .limit(1)
       .for("update");
 
+    const databaseNow = await freshDatabaseTime(transaction);
     if (
       !attempt ||
       attempt.leaseOwner !== input.runnerId ||
       attempt.leaseGeneration !== input.leaseGeneration ||
       !attempt.leaseExpiresAt ||
-      attempt.leaseExpiresAt <= input.now
+      attempt.leaseExpiresAt <= databaseNow
     ) {
       throw new DevelopmentLeaseError("Development attempt lease is not current");
     }
-    return attempt;
+    return { attempt, databaseNow };
   }
 
   async function insertEvent(
@@ -172,7 +186,7 @@ export function createDevelopmentRepositories(
     const fence = fenceSchema.parse(input);
     const safeSummary = redactText(input.safeSummary, knownSecrets).slice(0, 2_000);
     return database.transaction(async (transaction) => {
-      const attempt = await lockedAttempt(transaction, fence);
+      const { attempt, databaseNow } = await lockedAttempt(transaction, fence);
       const [task] = await transaction
         .select()
         .from(developmentTasks)
@@ -193,21 +207,21 @@ export function createDevelopmentRepositories(
         .set({
           candidateCommit,
           candidateRef: captured.candidateRef,
-          completedAt: fence.now,
+          completedAt: databaseNow,
           safeSummary,
           status: "succeeded",
-          updatedAt: fence.now
+          updatedAt: databaseNow
         })
         .where(eq(developmentAttempts.id, attempt.id))
         .returning();
       const [updatedTask] = await transaction
         .update(developmentTasks)
-        .set({ status: "candidate_ready", updatedAt: fence.now })
+        .set({ status: "candidate_ready", updatedAt: databaseNow })
         .where(eq(developmentTasks.id, attempt.taskId))
         .returning();
       await insertEvent(transaction, {
         attemptId: attempt.id,
-        createdAt: fence.now,
+        createdAt: databaseNow,
         kind: "git",
         safeMetadata: { candidate_commit: candidateCommit, candidate_ref: captured.candidateRef },
         status: "success"
@@ -296,52 +310,165 @@ export function createDevelopmentRepositories(
     claimReadyDevelopmentTask: async (input: z.input<typeof claimInputSchema>) => {
       const value = claimInputSchema.parse(input);
       return database.transaction(async (transaction) => {
+        const conditions = [eq(developmentTasks.status, "ready")];
+        if (value.taskId) conditions.push(eq(developmentTasks.id, value.taskId));
         const [task] = await transaction
           .select()
           .from(developmentTasks)
-          .where(eq(developmentTasks.status, "ready"))
+          .where(and(...conditions))
           .orderBy(asc(developmentTasks.createdAt), asc(developmentTasks.id))
           .limit(1)
           .for("update", { skipLocked: true });
         if (!task) return undefined;
 
+        const databaseNow = await freshDatabaseTime(transaction);
         const attemptId = randomUUID();
-        const expiresAt = leaseExpiry(value.now, value.leaseDurationMs);
         const [attempt] = await transaction
           .insert(developmentAttempts)
           .values({
             attemptNumber: 1,
             baseCommit: task.baseCommit,
             budget: value.budget,
-            createdAt: value.now,
+            createdAt: databaseNow,
             harnessAdapter: "pi",
             id: attemptId,
-            leaseExpiresAt: expiresAt,
+            leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
             leaseGeneration: 1,
             leaseOwner: value.runnerId,
             modelProfile: value.modelProfile,
             role: "implementer",
             sandboxId: `development-attempt-${attemptId}`,
-            startedAt: value.now,
+            startedAt: databaseNow,
             status: "preparing",
             taskId: task.id,
-            updatedAt: value.now,
+            updatedAt: databaseNow,
             usage: emptyDevelopmentUsage()
           })
           .returning();
         const [updatedTask] = await transaction
           .update(developmentTasks)
-          .set({ status: "preparing", updatedAt: value.now })
+          .set({ status: "preparing", updatedAt: databaseNow })
           .where(and(eq(developmentTasks.id, task.id), eq(developmentTasks.status, "ready")))
           .returning();
         await insertEvent(transaction, {
           attemptId,
-          createdAt: value.now,
+          createdAt: databaseNow,
           kind: "transition",
           safeMetadata: { from_status: "ready", lease_generation: 1, to_status: "preparing" },
           status: "started"
         });
-        return { attempt: attempt!, task: updatedTask! };
+        return { attempt: attempt!, sourceReview: undefined, task: updatedTask! };
+      });
+    },
+
+    claimFixRequiredDevelopmentTask: async (input: {
+      budget: unknown;
+      contextPolicy: unknown;
+      leaseDurationMs: number;
+      modelProfile: unknown;
+      runnerId: string;
+      taskId?: string;
+    }) => {
+      const value = z.object({
+        budget: developmentBudgetSchema,
+        contextPolicy: developmentImplementerContextPolicySchema,
+        leaseDurationMs: positiveDurationSchema,
+        modelProfile: modelProfileSchema,
+        runnerId: shortText,
+        taskId: uuidSchema.optional()
+      }).strict().parse(input);
+      return database.transaction(async (transaction) => {
+        const conditions = [eq(developmentTasks.status, "fix_required")];
+        if (value.taskId) conditions.push(eq(developmentTasks.id, value.taskId));
+        const [task] = await transaction
+          .select()
+          .from(developmentTasks)
+          .where(and(...conditions))
+          .orderBy(asc(developmentTasks.createdAt), asc(developmentTasks.id))
+          .limit(1)
+          .for("update", { skipLocked: true });
+        if (!task) return undefined;
+        if (task.authorityInvalidatedAt) {
+          throw new DevelopmentTransitionError("Invalidated task cannot start a fix attempt");
+        }
+        const [parentAttempt] = await transaction
+          .select()
+          .from(developmentAttempts)
+          .where(eq(developmentAttempts.taskId, task.id))
+          .orderBy(desc(developmentAttempts.attemptNumber))
+          .limit(1)
+          .for("update");
+        const [sourceReview] = await transaction
+          .select()
+          .from(developmentReviews)
+          .where(eq(developmentReviews.implementerAttemptId, parentAttempt!.id))
+          .limit(1)
+          .for("update");
+        if (
+          parentAttempt?.status !== "succeeded" ||
+          parentAttempt.failureClass ||
+          !parentAttempt.candidateCommit ||
+          !sourceReview ||
+          sourceReview.status !== "succeeded" ||
+          sourceReview.decision !== "REQUEST_CHANGES" ||
+          sourceReview.failureClass ||
+          !sourceReview.finalizedAt ||
+          sourceReview.candidateCommit !== parentAttempt.candidateCommit ||
+          sourceReview.candidateRef !== parentAttempt.candidateRef
+        ) {
+          throw new DevelopmentTransitionError(
+            "Fix claim requires the reconciled authoritative rejected candidate"
+          );
+        }
+        const fixIteration = (parentAttempt.fixIteration ?? 0) + 1;
+        const databaseNow = await freshDatabaseTime(transaction);
+        const attemptId = randomUUID();
+        const [attempt] = await transaction
+          .insert(developmentAttempts)
+          .values({
+            attemptNumber: fixIteration + 1,
+            baseCommit: parentAttempt.candidateCommit,
+            budget: value.budget,
+            contextPolicy: value.contextPolicy,
+            createdAt: databaseNow,
+            fixIteration,
+            harnessAdapter: "pi",
+            id: attemptId,
+            infrastructureRetryCount: 0,
+            leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
+            leaseGeneration: 1,
+            leaseOwner: value.runnerId,
+            modelProfile: value.modelProfile,
+            parentCandidateCommit: parentAttempt.candidateCommit,
+            role: "implementer",
+            sandboxId: `development-attempt-${attemptId}`,
+            sourceReviewId: sourceReview.id,
+            startedAt: databaseNow,
+            status: "preparing",
+            taskId: task.id,
+            updatedAt: databaseNow,
+            usage: emptyDevelopmentUsage()
+          })
+          .returning();
+        const [updatedTask] = await transaction
+          .update(developmentTasks)
+          .set({ needsHumanReason: null, status: "preparing", updatedAt: databaseNow })
+          .where(eq(developmentTasks.id, task.id))
+          .returning();
+        await insertEvent(transaction, {
+          attemptId,
+          createdAt: databaseNow,
+          kind: "transition",
+          safeMetadata: {
+            fix_iteration: fixIteration,
+            from_status: "fix_required",
+            lease_generation: 1,
+            source_review_id: sourceReview.id,
+            to_status: "preparing"
+          },
+          status: "started"
+        });
+        return { attempt: attempt!, sourceReview, task: updatedTask! };
       });
     },
 
@@ -356,13 +483,31 @@ export function createDevelopmentRepositories(
           baseCommit: value.baseCommit,
           createdAt: value.approvedAt,
           id: randomUUID(),
-          maxAttempts: 1,
           status: "ready",
           title: value.title,
           updatedAt: value.approvedAt
         })
         .returning();
       return task!;
+    },
+
+    getConsumedFixAttemptInput: async (id: string) => {
+      const [row] = await database
+        .select({ attempt: developmentAttempts, sourceReview: developmentReviews, task: developmentTasks })
+        .from(developmentAttempts)
+        .innerJoin(developmentTasks, eq(developmentTasks.id, developmentAttempts.taskId))
+        .innerJoin(developmentReviews, eq(developmentReviews.id, developmentAttempts.sourceReviewId))
+        .where(and(
+          eq(developmentAttempts.id, uuidSchema.parse(id)),
+          sql`${developmentAttempts.fixIteration} is not null`,
+          sql`${developmentAttempts.parentCandidateCommit} is not null`,
+          eq(developmentReviews.status, "succeeded"),
+          eq(developmentReviews.decision, "REQUEST_CHANGES"),
+          eq(developmentReviews.candidateCommit, developmentAttempts.parentCandidateCommit),
+          eq(developmentReviews.taskId, developmentTasks.id)
+        ))
+        .limit(1);
+      return row;
     },
 
     getDevelopmentAttempt: async (id: string) => {
@@ -382,6 +527,26 @@ export function createDevelopmentRepositories(
         .limit(1);
       return task;
     },
+
+    lastDevelopmentTeardownSucceeded: async (attemptId: string) => {
+      const [event] = await database
+        .select()
+        .from(developmentAttemptEvents)
+        .where(and(
+          eq(developmentAttemptEvents.attemptId, uuidSchema.parse(attemptId)),
+          eq(developmentAttemptEvents.kind, "teardown")
+        ))
+        .orderBy(desc(developmentAttemptEvents.sequence))
+        .limit(1);
+      return event?.status === "success";
+    },
+
+    listDevelopmentAttempts: async (taskId: string) =>
+      database
+        .select()
+        .from(developmentAttempts)
+        .where(eq(developmentAttempts.taskId, uuidSchema.parse(taskId)))
+        .orderBy(asc(developmentAttempts.attemptNumber)),
 
     listDevelopmentAttemptEvents: async (attemptId: string) =>
       database
@@ -407,40 +572,148 @@ export function createDevelopmentRepositories(
           .select()
           .from(developmentAttempts)
           .where(
-            and(
-              lte(developmentAttempts.leaseExpiresAt, value.now),
-              sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`
-            )
+            sql`${developmentAttempts.status} in ('preparing', 'implementing', 'testing', 'capturing_candidate')`
           )
           .orderBy(asc(developmentAttempts.leaseExpiresAt), asc(developmentAttempts.id))
           .limit(1)
           .for("update", { skipLocked: true });
         if (!attempt) return undefined;
+        const databaseNow = await freshDatabaseTime(transaction);
+        if (!attempt.leaseExpiresAt || attempt.leaseExpiresAt > databaseNow) return undefined;
 
         const leaseGeneration = attempt.leaseGeneration + 1;
         const [updatedAttempt] = await transaction
           .update(developmentAttempts)
           .set({
-            leaseExpiresAt: leaseExpiry(value.now, value.leaseDurationMs),
+            leaseExpiresAt: leaseExpiry(databaseNow, value.leaseDurationMs),
             leaseGeneration,
             leaseOwner: value.runnerId,
             status: "interrupted",
-            updatedAt: value.now
+            updatedAt: databaseNow
           })
           .where(eq(developmentAttempts.id, attempt.id))
           .returning();
         await transaction
           .update(developmentTasks)
-          .set({ status: "blocked", updatedAt: value.now })
+          .set({ status: attempt.fixIteration ? "preparing" : "blocked", updatedAt: databaseNow })
           .where(eq(developmentTasks.id, attempt.taskId));
         await insertEvent(transaction, {
           attemptId: attempt.id,
-          createdAt: value.now,
+          createdAt: databaseNow,
           kind: "transition",
           safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired" },
           status: "unknown"
         });
         return updatedAttempt!;
+      });
+    },
+
+    prepareDevelopmentInfrastructureRetry: async (input: {
+      attemptId: string;
+      failureClass: string;
+      leaseDurationMs: number;
+      leaseGeneration: number;
+      runnerId: string;
+    }) => {
+      const fence = fenceSchema.parse({ ...input, now: new Date() });
+      const failureClass = shortText.parse(input.failureClass);
+      return database.transaction(async (transaction) => {
+        const { attempt, databaseNow } = await lockedAttempt(transaction, fence);
+        const [task] = await transaction
+          .select()
+          .from(developmentTasks)
+          .where(eq(developmentTasks.id, attempt.taskId))
+          .limit(1)
+          .for("update");
+        if (
+          !attempt.fixIteration ||
+          attempt.infrastructureRetryCount >= 2 ||
+          !["preparing", "implementing", "testing", "capturing_candidate", "interrupted"].includes(attempt.status) ||
+          !task ||
+          task.authorityInvalidatedAt
+        ) {
+          throw new DevelopmentTransitionError("Infrastructure retry is not authorized");
+        }
+        const leaseGeneration = attempt.leaseGeneration + 1;
+        const [updatedAttempt] = await transaction
+          .update(developmentAttempts)
+          .set({
+            failureClass: null,
+            infrastructureRetryCount: attempt.infrastructureRetryCount + 1,
+            leaseExpiresAt: leaseExpiry(databaseNow, input.leaseDurationMs),
+            leaseGeneration,
+            leaseOwner: input.runnerId,
+            status: "preparing",
+            updatedAt: databaseNow
+          })
+          .where(eq(developmentAttempts.id, attempt.id))
+          .returning();
+        const [updatedTask] = await transaction
+          .update(developmentTasks)
+          .set({ needsHumanReason: null, status: "preparing", updatedAt: databaseNow })
+          .where(eq(developmentTasks.id, task.id))
+          .returning();
+        await insertEvent(transaction, {
+          attemptId: attempt.id,
+          createdAt: databaseNow,
+          kind: "transition",
+          safeMetadata: {
+            failure_class: failureClass,
+            infrastructure_retry_count: updatedAttempt!.infrastructureRetryCount,
+            lease_generation: leaseGeneration,
+            to_status: "preparing"
+          },
+          status: "unknown"
+        });
+        return { attempt: updatedAttempt!, task: updatedTask! };
+      });
+    },
+
+    markDevelopmentNeedsHuman: async (input: {
+      attemptId: string;
+      failureClass: string;
+      leaseGeneration: number;
+      reason: unknown;
+      runnerId: string;
+    }) => {
+      const fence = fenceSchema.parse({ ...input, now: new Date() });
+      const reason = developmentNeedsHumanReasonSchema.parse(input.reason);
+      const failureClass = shortText.parse(input.failureClass);
+      return database.transaction(async (transaction) => {
+        const { attempt, databaseNow } = await lockedAttempt(transaction, fence);
+        const [task] = await transaction
+          .select()
+          .from(developmentTasks)
+          .where(eq(developmentTasks.id, attempt.taskId))
+          .limit(1)
+          .for("update");
+        if (!attempt.fixIteration) {
+          throw new DevelopmentTransitionError("Only a fix attempt can require Phase 2C human action");
+        }
+        const [updatedAttempt] = await transaction
+          .update(developmentAttempts)
+          .set({
+            completedAt: databaseNow,
+            failureClass,
+            safeSummary: "Phase 2C fix attempt stopped for deterministic human escalation",
+            status: "failed",
+            updatedAt: databaseNow
+          })
+          .where(eq(developmentAttempts.id, attempt.id))
+          .returning();
+        const [updatedTask] = await transaction
+          .update(developmentTasks)
+          .set({ needsHumanReason: reason, status: "needs_human", updatedAt: databaseNow })
+          .where(eq(developmentTasks.id, task!.id))
+          .returning();
+        await insertEvent(transaction, {
+          attemptId: attempt.id,
+          createdAt: databaseNow,
+          kind: "transition",
+          safeMetadata: { failure_class: failureClass, reason, to_status: "needs_human" },
+          status: "blocked"
+        });
+        return { attempt: updatedAttempt!, task: updatedTask! };
       });
     },
 
@@ -454,7 +727,7 @@ export function createDevelopmentRepositories(
       const fence = fenceSchema.parse(input);
       const delta = developmentUsageSchema.parse(input.delta);
       return database.transaction(async (transaction) => {
-        const attempt = await lockedAttempt(transaction, fence);
+        const { attempt } = await lockedAttempt(transaction, fence);
         const usage = addUsage(developmentUsageSchema.parse(attempt.usage), delta);
         const budget = developmentBudgetSchema.parse(attempt.budget);
         if (!usageWithinBudget(usage, budget)) {
@@ -515,14 +788,15 @@ export function createDevelopmentRepositories(
         throw new Error("Candidate ref is not the trusted attempt ref");
       }
       return database.transaction(async (transaction) => {
-        const attempt = await lockedAttempt(transaction, fence);
+        const { attempt } = await lockedAttempt(transaction, fence);
         const [task] = await transaction
           .select()
           .from(developmentTasks)
           .where(eq(developmentTasks.id, attempt.taskId))
           .limit(1)
           .for("update");
-        if (attempt.status !== "interrupted" || task?.status !== "blocked") {
+        const expectedTaskStatus = attempt.fixIteration ? "preparing" : "blocked";
+        if (attempt.status !== "interrupted" || task?.status !== expectedTaskStatus) {
           throw new DevelopmentTransitionError("Candidate reconciliation is not allowed in the current state");
         }
         const [updatedAttempt] = await transaction
@@ -561,21 +835,18 @@ export function createDevelopmentRepositories(
       runnerId: string;
     }) => {
       const fence = fenceSchema.parse(input);
-      const expiresAt = leaseExpiry(fence.now, input.leaseDurationMs);
-      const [attempt] = await database
-        .update(developmentAttempts)
-        .set({ leaseExpiresAt: expiresAt, updatedAt: fence.now })
-        .where(
-          and(
-            eq(developmentAttempts.id, fence.attemptId),
-            eq(developmentAttempts.leaseOwner, fence.runnerId),
-            eq(developmentAttempts.leaseGeneration, fence.leaseGeneration),
-            sql`${developmentAttempts.leaseExpiresAt} > ${fence.now}`
-          )
-        )
-        .returning();
-      if (!attempt) throw new DevelopmentLeaseError("Development attempt lease is not current");
-      return attempt;
+      return database.transaction(async (transaction) => {
+        const { attempt, databaseNow } = await lockedAttempt(transaction, fence);
+        const [updated] = await transaction
+          .update(developmentAttempts)
+          .set({
+            leaseExpiresAt: leaseExpiry(databaseNow, input.leaseDurationMs),
+            updatedAt: databaseNow
+          })
+          .where(eq(developmentAttempts.id, attempt.id))
+          .returning();
+        return updated!;
+      });
     },
 
     saveDevelopmentContext: async (input: {
@@ -590,7 +861,7 @@ export function createDevelopmentRepositories(
       const contextDigest = z.string().regex(/^[0-9a-f]{64}$/).parse(input.contextDigest);
       const contextManifest = developmentContextManifestSchema.parse(input.contextManifest);
       return database.transaction(async (transaction) => {
-        const attempt = await lockedAttempt(transaction, fence);
+        const { attempt } = await lockedAttempt(transaction, fence);
         if (
           attempt.contextDigest &&
           attempt.contextDigest !== contextDigest
@@ -626,7 +897,7 @@ export function createDevelopmentRepositories(
         ? redactText(input.safeSummary, knownSecrets).slice(0, 2_000)
         : undefined;
       return database.transaction(async (transaction) => {
-        const attempt = await lockedAttempt(transaction, fence);
+        const { attempt } = await lockedAttempt(transaction, fence);
         const [task] = await transaction
           .select()
           .from(developmentTasks)

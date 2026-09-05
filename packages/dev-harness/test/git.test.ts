@@ -108,6 +108,13 @@ describe("trusted Git and worktree authority", () => {
       workspacePath: workspace
     });
     expect(candidate.ref).toBe(`refs/personal-agent/development-attempts/${id}`);
+    await expect(fixture.git.changedPaths(fixture.base, candidate.commit, 100_000)).resolves.toEqual([
+      "src/value.txt"
+    ]);
+    await expect(fixture.git.diffRange(fixture.base, candidate.commit, 100_000)).resolves.toContain(
+      "candidate"
+    );
+    await expect(fixture.git.treeId(candidate.commit)).resolves.toMatch(/^[0-9a-f]{40}$/);
     await expect(fixture.git.verifyCandidateRef(id, fixture.base, candidate.commit)).resolves.toEqual(candidate);
     await expect(fixture.git.verifyCandidateRef(id, fixture.base, "f".repeat(40))).rejects.toThrow(
       "does not match"

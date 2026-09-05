@@ -157,6 +157,26 @@ describe("project-owned sandbox gateway", () => {
     expect(() => assertSandboxPath("/workspace", "/host/file")).toThrow("escapes");
   });
 
+  it("adds only the non-authoritative terminating tool for a fix Implementer", async () => {
+    const fixture = await gatewayFixture();
+    const fix = new SandboxGateway({
+      allowedPaths: ["src"],
+      budget,
+      fix: true,
+      forbiddenPaths: [".git"],
+      git: fixture.git,
+      onAudit: async () => undefined,
+      onUsage: async () => undefined,
+      sandboxManager: fixture.manager,
+      workspace: fixture.workspace
+    });
+    expect(fix.names).toContain("fix.submit");
+    expect(fix.names).not.toContain("git.commit");
+    await expect(fix.invoke("fix.submit", { outcome: "FIX_COMPLETE" })).rejects.toThrow(
+      "Pi adapter"
+    );
+  });
+
   it("reads, lists, searches, writes, edits, and audits only workspace-scoped files", async () => {
     const fixture = await gatewayFixture();
     await expect(fixture.gateway.invoke("sandbox.read", { path: "src/value.txt" })).resolves.toMatchObject({

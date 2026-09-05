@@ -249,13 +249,13 @@ describe("Phase 2A trusted development coordinator", () => {
       runnerId: "real-sandbox-runner",
       sandboxManager
     });
-    await isolated.createApprovedTask({
+    const task = await isolated.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Change the isolated fixture and run the deterministic Node check.",
       baseReference: fixture.base,
       title: "Real sandbox fixture"
     });
-    const result = await isolated.runOne(policy);
+    const result = await isolated.runOne(policy, { taskId: task.id });
     expect(result).toMatchObject({
       attempt: { status: "succeeded" },
       task: { status: "candidate_ready" }
@@ -292,7 +292,7 @@ describe("Phase 2A trusted development coordinator", () => {
       title: "Implement fixture"
     });
     expect(task.baseCommit).toBe(fixture.base);
-    const result = await setup.coordinator.runOne(policy);
+    const result = await setup.coordinator.runOne(policy, { taskId: task.id });
     expect(result?.task.status).toBe("candidate_ready");
     expect(result?.attempt.status).toBe("succeeded");
     expect(result?.attempt.contextDigest).toMatch(/^[0-9a-f]{64}$/);
@@ -312,7 +312,7 @@ describe("Phase 2A trusted development coordinator", () => {
     expect(events.some((event) => event.kind === "test" && event.status === "success")).toBe(true);
     expect(events.some((event) => event.kind === "teardown" && event.status === "success")).toBe(true);
     expect(JSON.stringify(events)).not.toContain("COORDINATOR_CANARY");
-    await expect(setup.coordinator.runOne(policy)).resolves.toBeUndefined();
+    await expect(setup.coordinator.runOne(policy, { taskId: task.id })).resolves.toBeUndefined();
     execFileSync("git", ["update-ref", "-d", result!.attempt.candidateRef!], {
       cwd: fixture.repository
     });
@@ -379,7 +379,7 @@ describe("Phase 2A trusted development coordinator", () => {
         baseReference: fixture.base,
         title: `Failure ${test.label}`
       });
-      await expect(setup.coordinator.runOne(policy)).rejects.toBeDefined();
+      await expect(setup.coordinator.runOne(policy, { taskId: task.id })).rejects.toBeDefined();
       await expect(setup.persistence.getDevelopmentTask(task.id)).resolves.toMatchObject({ status: "failed" });
       const attempts = await database.query.developmentAttempts.findMany({
         where: (attempts, { eq }) => eq(attempts.taskId, task.id)
@@ -392,14 +392,17 @@ describe("Phase 2A trusted development coordinator", () => {
   it("classifies validation, heartbeat, candidate-integrity, transition, and teardown failures deterministically", async () => {
     const validationFixture = await repositoryFixture();
     const validation = coordinator({ fixture: validationFixture, runnerId: "validation-runner" });
-    await validation.coordinator.createApprovedTask({
+    const validationTask = await validation.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Invalid context selection",
       baseReference: validationFixture.base,
       title: "Validation"
     });
     await expect(
-      validation.coordinator.runOne({ ...policy, relevantPaths: ["../escape"] })
+      validation.coordinator.runOne(
+        { ...policy, relevantPaths: ["../escape"] },
+        { taskId: validationTask.id }
+      )
     ).rejects.toBeDefined();
 
     const heartbeatFixture = await repositoryFixture();
@@ -413,14 +416,17 @@ describe("Phase 2A trusted development coordinator", () => {
       runnerId: "heartbeat-runner",
       sandboxManager: heartbeatManager
     });
-    await heartbeatCoordinator.createApprovedTask({
+    const heartbeatTask = await heartbeatCoordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Heartbeat success",
       baseReference: heartbeatFixture.base,
       title: "Heartbeat"
     });
     await expect(
-      heartbeatCoordinator.runOne({ ...policy, leaseDurationMs: 900 })
+      heartbeatCoordinator.runOne(
+        { ...policy, leaseDurationMs: 900 },
+        { taskId: heartbeatTask.id }
+      )
     ).resolves.toMatchObject({ task: { status: "candidate_ready" } });
 
     const expiredFixture = await repositoryFixture();
@@ -429,14 +435,17 @@ describe("Phase 2A trusted development coordinator", () => {
       harness: new FakeHarness("complete", 400),
       runnerId: "expired-heartbeat-runner"
     });
-    await expired.coordinator.createApprovedTask({
+    const expiredTask = await expired.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Heartbeat expires",
       baseReference: expiredFixture.base,
       title: "Expired heartbeat"
     });
     await expect(
-      expired.coordinator.runOne({ ...policy, leaseDurationMs: 100 })
+      expired.coordinator.runOne(
+        { ...policy, leaseDurationMs: 100 },
+        { taskId: expiredTask.id }
+      )
     ).rejects.toBeInstanceOf(DevelopmentLeaseError);
     await expect(expired.coordinator.recoverOne(30_000)).resolves.toMatchObject({
       candidate: undefined
@@ -444,18 +453,20 @@ describe("Phase 2A trusted development coordinator", () => {
 
     const integrityFixture = await repositoryFixture();
     const integrity = coordinator({ fixture: integrityFixture, runnerId: "integrity-runner" });
-    await integrity.coordinator.createApprovedTask({
+    const integrityTask = await integrity.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Candidate integrity",
       baseReference: integrityFixture.base,
       title: "Integrity"
     });
     vi.spyOn(integrityFixture.git, "verifyCandidateRef").mockResolvedValueOnce(undefined);
-    await expect(integrity.coordinator.runOne(policy)).rejects.toThrow("disappeared");
+    await expect(
+      integrity.coordinator.runOne(policy, { taskId: integrityTask.id })
+    ).resolves.toMatchObject({ task: { status: "candidate_ready" } });
 
     const transitionFixture = await repositoryFixture();
     const transition = coordinator({ fixture: transitionFixture, runnerId: "transition-runner" });
-    await transition.coordinator.createApprovedTask({
+    const transitionTask = await transition.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Transition integrity",
       baseReference: transitionFixture.base,
@@ -467,7 +478,10 @@ describe("Phase 2A trusted development coordinator", () => {
       return originalTransition(input);
     });
     await expect(
-      transition.coordinator.runOne({ ...policy, relevantPaths: ["../escape"] })
+      transition.coordinator.runOne(
+        { ...policy, relevantPaths: ["../escape"] },
+        { taskId: transitionTask.id }
+      )
     ).rejects.toThrow("terminal persistence failed");
 
     const fencedTransitionFixture = await repositoryFixture();
@@ -475,7 +489,7 @@ describe("Phase 2A trusted development coordinator", () => {
       fixture: fencedTransitionFixture,
       runnerId: "fenced-transition-runner"
     });
-    await fencedTransition.coordinator.createApprovedTask({
+    const fencedTransitionTask = await fencedTransition.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Fenced terminal transition",
       baseReference: fencedTransitionFixture.base,
@@ -489,7 +503,10 @@ describe("Phase 2A trusted development coordinator", () => {
       }
     );
     await expect(
-      fencedTransition.coordinator.runOne({ ...policy, relevantPaths: ["../escape"] })
+      fencedTransition.coordinator.runOne(
+        { ...policy, relevantPaths: ["../escape"] },
+        { taskId: fencedTransitionTask.id }
+      )
     ).rejects.not.toBeInstanceOf(DevelopmentLeaseError);
 
     const teardownFixture = await repositoryFixture();
@@ -500,13 +517,15 @@ describe("Phase 2A trusted development coordinator", () => {
       manager: teardownManager,
       runnerId: "teardown-runner"
     });
-    await teardown.coordinator.createApprovedTask({
+    const teardownTask = await teardown.coordinator.createApprovedTask({
       acceptanceCriteria: criteria,
       approvedSpec: "Teardown recording",
       baseReference: teardownFixture.base,
       title: "Teardown"
     });
-    const teardownResult = await teardown.coordinator.runOne(policy);
+    const teardownResult = await teardown.coordinator.runOne(policy, {
+      taskId: teardownTask.id
+    });
     const teardownEvents = await teardown.persistence.listDevelopmentAttemptEvents(
       teardownResult!.attempt.id
     );
@@ -526,7 +545,7 @@ describe("Phase 2A trusted development coordinator", () => {
     for (const leaseError of [false, true]) {
       const fixture = await repositoryFixture();
       const setup = coordinator({ fixture, runnerId: `teardown-event-${String(leaseError)}` });
-      await setup.coordinator.createApprovedTask({
+      const task = await setup.coordinator.createApprovedTask({
         acceptanceCriteria: criteria,
         approvedSpec: "Teardown event error",
         baseReference: fixture.base,
@@ -541,11 +560,15 @@ describe("Phase 2A trusted development coordinator", () => {
         return originalAppend(input);
       });
       if (leaseError) {
-        await expect(setup.coordinator.runOne(policy)).resolves.toMatchObject({
+        await expect(
+          setup.coordinator.runOne(policy, { taskId: task.id })
+        ).resolves.toMatchObject({
           task: { status: "candidate_ready" }
         });
       } else {
-        await expect(setup.coordinator.runOne(policy)).rejects.toThrow("teardown audit failed");
+        await expect(
+          setup.coordinator.runOne(policy, { taskId: task.id })
+        ).rejects.toThrow("teardown audit failed");
       }
     }
   });

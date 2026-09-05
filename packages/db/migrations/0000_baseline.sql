@@ -92,9 +92,14 @@ CREATE TABLE "development_attempts" (
 	"harness_adapter" text NOT NULL,
 	"model_profile" text NOT NULL,
 	"base_commit" text NOT NULL,
+	"parent_candidate_commit" text,
+	"source_review_id" uuid,
+	"fix_iteration" integer,
+	"infrastructure_retry_count" integer DEFAULT 0 NOT NULL,
 	"candidate_commit" text,
 	"candidate_ref" text,
 	"sandbox_id" text NOT NULL,
+	"context_policy" jsonb,
 	"context_manifest" jsonb,
 	"context_digest" text,
 	"budget" jsonb NOT NULL,
@@ -109,15 +114,21 @@ CREATE TABLE "development_attempts" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "development_attempts_task_number_unique" UNIQUE("task_id","attempt_number"),
-	CONSTRAINT "development_attempts_number_check" CHECK ("development_attempts"."attempt_number" = 1),
+	CONSTRAINT "development_attempts_source_review_unique" UNIQUE("source_review_id"),
+	CONSTRAINT "development_attempts_task_fix_iteration_unique" UNIQUE("task_id","fix_iteration"),
+	CONSTRAINT "development_attempts_number_check" CHECK ("development_attempts"."attempt_number" between 1 and 4),
 	CONSTRAINT "development_attempts_role_check" CHECK ("development_attempts"."role" = 'implementer'),
 	CONSTRAINT "development_attempts_status_check" CHECK ("development_attempts"."status" in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'succeeded', 'interrupted', 'failed', 'cancelled')),
 	CONSTRAINT "development_attempts_harness_check" CHECK ("development_attempts"."harness_adapter" = 'pi'),
 	CONSTRAINT "development_attempts_model_profile_check" CHECK ("development_attempts"."model_profile" in ('fast', 'balanced', 'reasoning')),
 	CONSTRAINT "development_attempts_base_commit_check" CHECK ("development_attempts"."base_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+	CONSTRAINT "development_attempts_parent_candidate_check" CHECK ("development_attempts"."parent_candidate_commit" is null or "development_attempts"."parent_candidate_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
+	CONSTRAINT "development_attempts_fix_lineage_check" CHECK (("development_attempts"."fix_iteration" is null and "development_attempts"."source_review_id" is null and "development_attempts"."parent_candidate_commit" is null and "development_attempts"."attempt_number" = 1) or ("development_attempts"."fix_iteration" between 1 and 3 and "development_attempts"."source_review_id" is not null and "development_attempts"."parent_candidate_commit" is not null and "development_attempts"."attempt_number" = "development_attempts"."fix_iteration" + 1)),
+	CONSTRAINT "development_attempts_infrastructure_retry_check" CHECK ("development_attempts"."infrastructure_retry_count" between 0 and 2),
 	CONSTRAINT "development_attempts_candidate_commit_check" CHECK ("development_attempts"."candidate_commit" is null or "development_attempts"."candidate_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
 	CONSTRAINT "development_attempts_candidate_pair_check" CHECK (("development_attempts"."candidate_commit" is null and "development_attempts"."candidate_ref" is null) or ("development_attempts"."candidate_commit" is not null and "development_attempts"."candidate_ref" is not null)),
 	CONSTRAINT "development_attempts_succeeded_candidate_check" CHECK (("development_attempts"."status" = 'succeeded') = ("development_attempts"."candidate_commit" is not null)),
+	CONSTRAINT "development_attempts_context_policy_check" CHECK (("development_attempts"."fix_iteration" is null) or ("development_attempts"."context_policy" is not null and jsonb_typeof("development_attempts"."context_policy") = 'object')),
 	CONSTRAINT "development_attempts_context_pair_check" CHECK (("development_attempts"."context_manifest" is null and "development_attempts"."context_digest" is null) or ("development_attempts"."context_manifest" is not null and "development_attempts"."context_digest" is not null)),
 	CONSTRAINT "development_attempts_context_manifest_object_check" CHECK ("development_attempts"."context_manifest" is null or jsonb_typeof("development_attempts"."context_manifest") = 'object'),
 	CONSTRAINT "development_attempts_context_digest_check" CHECK ("development_attempts"."context_digest" is null or "development_attempts"."context_digest" ~ '^[0-9a-f]{64}$'),
@@ -161,6 +172,7 @@ CREATE TABLE "development_reviews" (
 	"context_policy" jsonb NOT NULL,
 	"budget" jsonb NOT NULL,
 	"usage" jsonb NOT NULL,
+	"infrastructure_retry_count" integer DEFAULT 0 NOT NULL,
 	"lease_owner" text NOT NULL,
 	"lease_expires_at" timestamp with time zone NOT NULL,
 	"lease_generation" integer DEFAULT 1 NOT NULL,
@@ -174,7 +186,6 @@ CREATE TABLE "development_reviews" (
 	"finalized_at" timestamp with time zone,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "development_reviews_task_unique" UNIQUE("task_id"),
 	CONSTRAINT "development_reviews_implementer_attempt_unique" UNIQUE("implementer_attempt_id"),
 	CONSTRAINT "development_reviews_role_check" CHECK ("development_reviews"."role" = 'reviewer'),
 	CONSTRAINT "development_reviews_status_check" CHECK ("development_reviews"."status" in ('preparing', 'reviewing', 'finalizing', 'interrupted', 'succeeded', 'failed')),
@@ -195,6 +206,7 @@ CREATE TABLE "development_reviews" (
 	CONSTRAINT "development_reviews_proposal_state_check" CHECK ("development_reviews"."decision" is null or "development_reviews"."status" in ('finalizing', 'succeeded', 'failed')),
 	CONSTRAINT "development_reviews_cleanup_status_check" CHECK ("development_reviews"."cleanup_status" in ('pending', 'failed', 'succeeded')),
 	CONSTRAINT "development_reviews_lease_generation_check" CHECK ("development_reviews"."lease_generation" > 0),
+	CONSTRAINT "development_reviews_infrastructure_retry_check" CHECK ("development_reviews"."infrastructure_retry_count" between 0 and 2),
 	CONSTRAINT "development_reviews_completion_check" CHECK (("development_reviews"."status" in ('succeeded', 'failed') and "development_reviews"."completed_at" is not null) or ("development_reviews"."status" not in ('succeeded', 'failed') and "development_reviews"."completed_at" is null)),
 	CONSTRAINT "development_reviews_proposal_prerequisites_check" CHECK ("development_reviews"."status" not in ('finalizing', 'succeeded') or ("development_reviews"."decision" is not null and "development_reviews"."context_digest" is not null and "development_reviews"."context_manifest" is not null)),
 	CONSTRAINT "development_reviews_finalization_check" CHECK (("development_reviews"."status" = 'succeeded' and "development_reviews"."decision" is not null and "development_reviews"."context_digest" is not null and "development_reviews"."context_manifest" is not null and "development_reviews"."cleanup_status" = 'succeeded' and "development_reviews"."failure_class" is null and "development_reviews"."safe_summary" is not null and "development_reviews"."completed_at" is not null and "development_reviews"."finalized_at" is not null) or ("development_reviews"."status" <> 'succeeded' and "development_reviews"."finalized_at" is null))
@@ -207,14 +219,14 @@ CREATE TABLE "development_tasks" (
 	"acceptance_criteria" jsonb NOT NULL,
 	"status" text NOT NULL,
 	"base_commit" text NOT NULL,
-	"max_attempts" integer DEFAULT 1 NOT NULL,
 	"approved_at" timestamp with time zone NOT NULL,
 	"authority_invalidated_at" timestamp with time zone,
+	"needs_human_reason" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "development_tasks_status_check" CHECK ("development_tasks"."status" in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'blocked', 'failed', 'cancelled')),
+	CONSTRAINT "development_tasks_status_check" CHECK ("development_tasks"."status" in ('ready', 'preparing', 'implementing', 'testing', 'candidate_ready', 'fix_required', 'approved_candidate', 'needs_human', 'blocked', 'failed', 'cancelled')),
 	CONSTRAINT "development_tasks_base_commit_check" CHECK ("development_tasks"."base_commit" ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
-	CONSTRAINT "development_tasks_max_attempts_check" CHECK ("development_tasks"."max_attempts" = 1),
+	CONSTRAINT "development_tasks_needs_human_reason_check" CHECK ((("development_tasks"."status" = 'needs_human') = ("development_tasks"."needs_human_reason" is not null)) and ("development_tasks"."needs_human_reason" is null or "development_tasks"."needs_human_reason" in ('acceptance_ambiguity', 'authority_change_required', 'scope_expansion_required', 'architecture_conflict', 'security_boundary_change', 'consequential_approval_required', 'authority_invalidated', 'candidate_binding_invalid', 'context_unavailable', 'policy_missing', 'execution_budget_exhausted', 'fix_iteration_exhausted', 'infrastructure_retry_exhausted', 'deterministic_test_failure', 'reviewer_failure', 'non_convergence', 'durable_integrity_failure', 'minor_only_rejection'))),
 	CONSTRAINT "development_tasks_acceptance_criteria_array_check" CHECK (jsonb_typeof("development_tasks"."acceptance_criteria") = 'array' and jsonb_array_length("development_tasks"."acceptance_criteria") > 0)
 );
 --> statement-breakpoint
@@ -297,6 +309,7 @@ CREATE TABLE "tool_calls" (
 ALTER TABLE "automation_runs" ADD CONSTRAINT "automation_runs_automation_id_automations_id_fk" FOREIGN KEY ("automation_id") REFERENCES "public"."automations"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "development_attempt_events" ADD CONSTRAINT "development_attempt_events_attempt_id_development_attempts_id_fk" FOREIGN KEY ("attempt_id") REFERENCES "public"."development_attempts"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "development_attempts" ADD CONSTRAINT "development_attempts_task_id_development_tasks_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."development_tasks"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
+ALTER TABLE "development_attempts" ADD CONSTRAINT "development_attempts_source_review_id_development_reviews_id_fk" FOREIGN KEY ("source_review_id") REFERENCES "public"."development_reviews"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "development_review_events" ADD CONSTRAINT "development_review_events_review_id_development_reviews_id_fk" FOREIGN KEY ("review_id") REFERENCES "public"."development_reviews"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "development_reviews" ADD CONSTRAINT "development_reviews_task_id_development_tasks_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."development_tasks"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
 ALTER TABLE "development_reviews" ADD CONSTRAINT "development_reviews_implementer_attempt_id_development_attempts_id_fk" FOREIGN KEY ("implementer_attempt_id") REFERENCES "public"."development_attempts"("id") ON DELETE restrict ON UPDATE restrict;--> statement-breakpoint
@@ -312,6 +325,8 @@ CREATE INDEX "automation_runs_claim_idx" ON "automation_runs" USING btree ("stat
 CREATE INDEX "automation_runs_lease_expiry_idx" ON "automation_runs" USING btree ("lease_expires_at") WHERE "automation_runs"."lease_expires_at" is not null;--> statement-breakpoint
 CREATE INDEX "automations_due_idx" ON "automations" USING btree ("enabled","next_run_at");--> statement-breakpoint
 CREATE INDEX "command_requests_claim_idx" ON "command_requests" USING btree ("status","created_at");--> statement-breakpoint
+CREATE UNIQUE INDEX "development_attempts_initial_task_uidx" ON "development_attempts" USING btree ("task_id") WHERE "development_attempts"."fix_iteration" is null;--> statement-breakpoint
+CREATE UNIQUE INDEX "development_attempts_one_active_task_uidx" ON "development_attempts" USING btree ("task_id") WHERE "development_attempts"."status" in ('preparing', 'implementing', 'testing', 'capturing_candidate', 'interrupted');--> statement-breakpoint
 CREATE INDEX "development_attempts_lease_idx" ON "development_attempts" USING btree ("lease_expires_at") WHERE "development_attempts"."lease_expires_at" is not null;--> statement-breakpoint
 CREATE INDEX "development_reviews_claim_idx" ON "development_reviews" USING btree ("status","lease_expires_at");--> statement-breakpoint
 CREATE INDEX "development_tasks_claim_idx" ON "development_tasks" USING btree ("status","created_at");
@@ -330,20 +345,48 @@ FOR EACH ROW EXECUTE FUNCTION reject_run_event_mutation();
 CREATE FUNCTION protect_development_task_contract() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
+DECLARE
+	current_review development_reviews%ROWTYPE;
 BEGIN
 	IF OLD.authority_invalidated_at IS NOT NULL
 		AND NEW.authority_invalidated_at IS DISTINCT FROM OLD.authority_invalidated_at THEN
 		RAISE EXCEPTION 'development task authority invalidation is immutable' USING ERRCODE = '55000';
 	END IF;
+	IF OLD.status IN ('approved_candidate', 'needs_human', 'failed', 'cancelled')
+		AND NEW.status IS DISTINCT FROM OLD.status THEN
+		RAISE EXCEPTION 'terminal development task state is immutable' USING ERRCODE = '55000';
+	END IF;
 	IF OLD.status = 'candidate_ready' AND NEW.status = 'blocked'
 		AND OLD.authority_invalidated_at IS NULL THEN
 		NEW.authority_invalidated_at := clock_timestamp();
+	END IF;
+	IF OLD.status = 'candidate_ready'
+		AND NEW.status IN ('approved_candidate', 'fix_required') THEN
+		SELECT review.* INTO current_review
+		FROM development_reviews review
+		JOIN development_attempts attempt ON attempt.id = review.implementer_attempt_id
+		WHERE review.task_id = OLD.id
+			AND attempt.attempt_number = (
+				SELECT max(latest.attempt_number)
+				FROM development_attempts latest
+				WHERE latest.task_id = OLD.id
+			)
+			AND attempt.status = 'succeeded'
+			AND attempt.failure_class IS NULL
+			AND attempt.candidate_commit = review.candidate_commit
+			AND review.status = 'succeeded'
+			AND review.finalized_at IS NOT NULL
+			AND review.failure_class IS NULL;
+		IF current_review.id IS NULL
+			OR (NEW.status = 'approved_candidate' AND current_review.decision <> 'APPROVE')
+			OR (NEW.status = 'fix_required' AND current_review.decision <> 'REQUEST_CHANGES') THEN
+			RAISE EXCEPTION 'Phase 2C transition requires the current authoritative finalized review' USING ERRCODE = '23514';
+		END IF;
 	END IF;
 	IF OLD.status <> 'ready' OR NEW.status <> 'ready' THEN
 		IF NEW.approved_spec IS DISTINCT FROM OLD.approved_spec
 			OR NEW.acceptance_criteria IS DISTINCT FROM OLD.acceptance_criteria
 			OR NEW.base_commit IS DISTINCT FROM OLD.base_commit
-			OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts
 			OR NEW.approved_at IS DISTINCT FROM OLD.approved_at THEN
 			RAISE EXCEPTION 'development task contract is immutable after execution starts' USING ERRCODE = '55000';
 		END IF;
@@ -360,36 +403,93 @@ CREATE OR REPLACE FUNCTION enforce_development_attempt_binding() RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-	task_base_commit text;
-	task_max_attempts integer;
+	task_row development_tasks%ROWTYPE;
+	source_review development_reviews%ROWTYPE;
+	policy_path jsonb;
 BEGIN
-	SELECT base_commit, max_attempts
-	INTO task_base_commit, task_max_attempts
-	FROM development_tasks
-	WHERE id = NEW.task_id;
-
-	IF task_base_commit IS NULL THEN
+	SELECT * INTO task_row FROM development_tasks WHERE id = NEW.task_id;
+	IF task_row.id IS NULL THEN
 		RAISE EXCEPTION 'development task does not exist' USING ERRCODE = '23503';
 	END IF;
-	IF NEW.base_commit <> task_base_commit THEN
-		RAISE EXCEPTION 'attempt base commit must match task base commit' USING ERRCODE = '23514';
-	END IF;
-	IF NEW.attempt_number > task_max_attempts THEN
-		RAISE EXCEPTION 'attempt number exceeds task budget' USING ERRCODE = '23514';
+	IF NEW.fix_iteration IS NULL THEN
+		IF NEW.base_commit <> task_row.base_commit OR NEW.attempt_number <> 1 THEN
+			RAISE EXCEPTION 'initial attempt must use the exact task base' USING ERRCODE = '23514';
+		END IF;
+	ELSE
+		SELECT * INTO source_review FROM development_reviews WHERE id = NEW.source_review_id;
+		IF source_review.id IS NULL
+			OR source_review.task_id <> NEW.task_id
+			OR source_review.status <> 'succeeded'
+			OR source_review.decision <> 'REQUEST_CHANGES'
+			OR source_review.finalized_at IS NULL
+			OR source_review.failure_class IS NOT NULL
+			OR source_review.candidate_commit <> NEW.parent_candidate_commit
+			OR NEW.base_commit <> NEW.parent_candidate_commit THEN
+			RAISE EXCEPTION 'fix attempt must consume one exact authoritative rejected review' USING ERRCODE = '23514';
+		END IF;
+		IF TG_OP = 'INSERT' AND task_row.status <> 'fix_required' THEN
+			RAISE EXCEPTION 'fix attempt requires reconciled fix_required task state' USING ERRCODE = '23514';
+		END IF;
+		IF jsonb_typeof(NEW.context_policy) <> 'object'
+			OR NOT (NEW.context_policy ?& ARRAY['allowedPaths', 'forbiddenPaths', 'relevantPaths'])
+			OR (SELECT count(*) FROM jsonb_object_keys(NEW.context_policy)) <> 3
+			OR jsonb_typeof(NEW.context_policy->'allowedPaths') <> 'array'
+			OR jsonb_array_length(NEW.context_policy->'allowedPaths') NOT BETWEEN 1 AND 64
+			OR jsonb_typeof(NEW.context_policy->'forbiddenPaths') <> 'array'
+			OR jsonb_array_length(NEW.context_policy->'forbiddenPaths') > 64
+			OR jsonb_typeof(NEW.context_policy->'relevantPaths') <> 'array'
+			OR jsonb_array_length(NEW.context_policy->'relevantPaths') > 64 THEN
+			RAISE EXCEPTION 'fix context policy has an invalid durable structure' USING ERRCODE = '23514';
+		END IF;
+		FOR policy_path IN
+			SELECT value FROM jsonb_array_elements(NEW.context_policy->'allowedPaths')
+			UNION ALL SELECT value FROM jsonb_array_elements(NEW.context_policy->'forbiddenPaths')
+		LOOP
+			IF jsonb_typeof(policy_path) <> 'string'
+				OR char_length(policy_path #>> '{}') NOT BETWEEN 1 AND 500
+				OR btrim(policy_path #>> '{}') <> policy_path #>> '{}'
+				OR (policy_path #>> '{}') LIKE '/%'
+				OR (policy_path #>> '{}') LIKE '%\%'
+				OR ((policy_path #>> '{}') <> '.' AND (policy_path #>> '{}') ~ '(^|/)(\.{1,2})($|/)|//|/$') THEN
+				RAISE EXCEPTION 'fix context policy contains an invalid scoped path' USING ERRCODE = '23514';
+			END IF;
+		END LOOP;
+		FOR policy_path IN SELECT value FROM jsonb_array_elements(NEW.context_policy->'relevantPaths')
+		LOOP
+			IF jsonb_typeof(policy_path) <> 'string'
+				OR char_length(policy_path #>> '{}') NOT BETWEEN 1 AND 500
+				OR btrim(policy_path #>> '{}') <> policy_path #>> '{}'
+				OR (policy_path #>> '{}') = '.'
+				OR (policy_path #>> '{}') LIKE '/%'
+				OR (policy_path #>> '{}') LIKE '%\%'
+				OR (policy_path #>> '{}') ~ '(^|/)(\.{1,2})($|/)|//|/$' THEN
+				RAISE EXCEPTION 'fix context policy contains an invalid relevant path' USING ERRCODE = '23514';
+			END IF;
+		END LOOP;
 	END IF;
 	IF NEW.candidate_ref IS NOT NULL
 		AND NEW.candidate_ref <> 'refs/personal-agent/development-attempts/' || NEW.id::text THEN
 		RAISE EXCEPTION 'candidate ref must be the trusted attempt ref' USING ERRCODE = '23514';
 	END IF;
-	IF TG_OP = 'UPDATE' AND OLD.candidate_commit IS NOT NULL AND (
+	IF TG_OP = 'UPDATE' AND (
 		NEW.task_id IS DISTINCT FROM OLD.task_id
 		OR NEW.attempt_number IS DISTINCT FROM OLD.attempt_number
 		OR NEW.role IS DISTINCT FROM OLD.role
 		OR NEW.base_commit IS DISTINCT FROM OLD.base_commit
-		OR NEW.candidate_commit IS DISTINCT FROM OLD.candidate_commit
-		OR NEW.candidate_ref IS DISTINCT FROM OLD.candidate_ref
+		OR NEW.parent_candidate_commit IS DISTINCT FROM OLD.parent_candidate_commit
+		OR NEW.source_review_id IS DISTINCT FROM OLD.source_review_id
+		OR NEW.fix_iteration IS DISTINCT FROM OLD.fix_iteration
+		OR NEW.context_policy IS DISTINCT FROM OLD.context_policy
+		OR (OLD.candidate_commit IS NOT NULL AND NEW.candidate_commit IS DISTINCT FROM OLD.candidate_commit)
+		OR (OLD.candidate_ref IS NOT NULL AND NEW.candidate_ref IS DISTINCT FROM OLD.candidate_ref)
 	) THEN
 		RAISE EXCEPTION 'captured development candidate provenance is immutable' USING ERRCODE = '55000';
+	END IF;
+	IF TG_OP = 'UPDATE' AND (
+		NEW.infrastructure_retry_count < OLD.infrastructure_retry_count
+		OR NEW.infrastructure_retry_count > OLD.infrastructure_retry_count + 1
+	) THEN
+		RAISE EXCEPTION 'infrastructure retry count is monotonic and bounded' USING ERRCODE = '23514';
 	END IF;
 	IF TG_OP = 'UPDATE' AND OLD.candidate_commit IS NOT NULL
 		AND OLD.failure_class IS NOT NULL
@@ -438,7 +538,6 @@ BEGIN
 		OR attempt_row.task_id <> NEW.task_id
 		OR attempt_row.role <> 'implementer'
 		OR attempt_row.status <> 'succeeded'
-		OR attempt_row.base_commit <> NEW.base_commit
 		OR attempt_row.candidate_commit <> NEW.candidate_commit
 		OR attempt_row.candidate_ref <> NEW.candidate_ref
 		OR task_row.base_commit <> NEW.base_commit
@@ -737,6 +836,7 @@ BEGIN
       OR NEW.completed_at IS NOT NULL
       OR NEW.finalized_at IS NOT NULL
       OR NEW.lease_generation <> 1
+      OR NEW.infrastructure_retry_count <> 0
       OR NEW.usage <> '{"commandMs":0,"commandOutputBytes":0,"costUsdMicros":0,"inputTokens":0,"modelInvocations":0,"outputTokens":0,"toolCalls":0}'::jsonb THEN
       RAISE EXCEPTION 'review must begin in the initial preparing state' USING ERRCODE = '23514';
     END IF;
@@ -745,14 +845,21 @@ BEGIN
       (OLD.status = 'preparing' AND NEW.status IN ('reviewing', 'interrupted'))
       OR (OLD.status = 'reviewing' AND NEW.status IN ('finalizing', 'interrupted'))
       OR (OLD.status = 'finalizing' AND NEW.status IN ('succeeded', 'failed'))
-      OR (OLD.status = 'interrupted' AND NEW.status = 'failed')
+      OR (OLD.status = 'interrupted' AND NEW.status IN ('preparing', 'failed'))
     ) THEN
       RAISE EXCEPTION 'invalid durable review state transition' USING ERRCODE = '23514';
     END IF;
     IF NEW.lease_generation IS DISTINCT FROM OLD.lease_generation THEN
       IF NEW.lease_generation <> OLD.lease_generation + 1
-        OR OLD.lease_expires_at > clock_timestamp()
-        OR NEW.lease_expires_at <= clock_timestamp() THEN
+        OR NEW.lease_expires_at <= clock_timestamp()
+        OR (
+          OLD.lease_expires_at > clock_timestamp()
+          AND NOT (
+            NEW.lease_owner = OLD.lease_owner
+            AND NEW.infrastructure_retry_count = OLD.infrastructure_retry_count + 1
+            AND NEW.status = 'preparing'
+          )
+        ) THEN
         RAISE EXCEPTION 'invalid durable review lease replacement' USING ERRCODE = '23514';
       END IF;
     ELSIF NEW.lease_owner IS DISTINCT FROM OLD.lease_owner THEN
@@ -761,10 +868,21 @@ BEGIN
       AND OLD.lease_expires_at <= clock_timestamp() THEN
       RAISE EXCEPTION 'expired review lease cannot be renewed' USING ERRCODE = '23514';
     END IF;
+    IF NEW.infrastructure_retry_count < OLD.infrastructure_retry_count
+      OR NEW.infrastructure_retry_count > OLD.infrastructure_retry_count + 1 THEN
+      RAISE EXCEPTION 'review infrastructure retry count is monotonic and bounded' USING ERRCODE = '23514';
+    END IF;
     IF NEW.cleanup_status IS DISTINCT FROM OLD.cleanup_status AND NOT (
-      OLD.cleanup_status IN ('pending', 'failed')
-      AND NEW.cleanup_status IN ('failed', 'succeeded')
-      AND NEW.status IN ('finalizing', 'interrupted')
+      (
+        OLD.cleanup_status IN ('pending', 'failed')
+        AND NEW.cleanup_status IN ('failed', 'succeeded')
+        AND NEW.status IN ('finalizing', 'interrupted')
+      ) OR (
+        OLD.cleanup_status = 'succeeded'
+        AND NEW.cleanup_status = 'pending'
+        AND NEW.status = 'preparing'
+        AND NEW.infrastructure_retry_count = OLD.infrastructure_retry_count + 1
+      )
     ) THEN
       RAISE EXCEPTION 'invalid durable review cleanup transition' USING ERRCODE = '23514';
     END IF;
