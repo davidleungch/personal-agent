@@ -441,6 +441,71 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     });
   });
 
+  it("recovers invalidated reviews as failure-only cleanup and preserves queue progress", async () => {
+    const fixture = await repositoryFixture();
+    const first = await candidateReady(fixture);
+    const second = await candidateReady(fixture);
+    const reviews = createReviewRepositories(database);
+    const claim = async (taskId: string, runnerId: string) => {
+      const result = (await reviews.claimCandidateReadyReview({
+        budget,
+        contextPolicy: { forbiddenPaths: policy.forbiddenPaths, readablePaths: policy.readablePaths, relevantPaths: policy.relevantPaths },
+        leaseDurationMs: policy.leaseDurationMs,
+        modelProfile: policy.modelProfile,
+        runnerId,
+        taskId
+      }))!;
+      await fixture.git.createWorktree(result.review.id, result.review.candidateCommit);
+      return result;
+    };
+    const reviewA = await claim(first.task.id, "invalidated-a");
+    const reviewB = await claim(second.task.id, "recoverable-b");
+    await first.persistence.blockDevelopmentCandidateIntegrity({ attemptId: first.attempt.id, now: new Date() });
+    await pool.query("update development_reviews set lease_expires_at = clock_timestamp() - interval '2 seconds' where id = $1", [reviewA.review.id]);
+    await pool.query("update development_reviews set lease_expires_at = clock_timestamp() - interval '1 second' where id = $1", [reviewB.review.id]);
+
+    const harness: DevelopmentHarness = { abort: vi.fn(async () => undefined), execute: vi.fn() };
+    const recovery = setup({ fixture, harness, manager: new FakeSandboxManager(), runnerId: "recovery" });
+    await expect(recovery.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toMatchObject({ status: "failed" });
+    await expect(recovery.persistence.getReview(reviewA.review.id)).resolves.toMatchObject({
+      failureClass: "authority_invalidated",
+      status: "failed"
+    });
+    await expect(first.persistence.getDevelopmentTask(first.task.id)).resolves.toMatchObject({
+      status: "blocked",
+      authorityInvalidatedAt: expect.any(Date)
+    });
+    expect(harness.execute).not.toHaveBeenCalled();
+
+    await expect(recovery.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toMatchObject({ status: "failed" });
+    await expect(recovery.persistence.getReview(reviewB.review.id)).resolves.toMatchObject({ status: "failed" });
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
+  it("invalidated finalizing proposals cannot become authoritative after recovery", async () => {
+    const fixture = await repositoryFixture();
+    const candidate = await candidateReady(fixture);
+    const manager = new FakeSandboxManager();
+    manager.teardownFailures = 1;
+    const harness = new FakeReviewerHarness({ decision: "APPROVE", findings: [] });
+    const initial = setup({ fixture, harness, manager, runnerId: "invalidated-finalizing" });
+    await expect(initial.coordinator.runOne(policy)).rejects.toThrow("cleanup failed");
+    const pending = (await initial.persistence.getReview(
+      (await database.query.developmentReviews.findFirst({ where: (reviews, { eq }) => eq(reviews.taskId, candidate.task.id) }))!.id
+    ))!;
+    await candidate.persistence.blockDevelopmentCandidateIntegrity({ attemptId: candidate.attempt.id, now: new Date() });
+    await pool.query("update development_reviews set cleanup_status = 'succeeded', lease_expires_at = clock_timestamp() - interval '1 second' where id = $1", [pending.id]);
+    const recovery = setup({ fixture, harness, manager, runnerId: "invalidated-finalizing-recovery" });
+    await expect(recovery.coordinator.recoverOne(policy.leaseDurationMs)).resolves.toMatchObject({ status: "failed" });
+    await expect(recovery.persistence.getReview(pending.id)).resolves.toMatchObject({
+      decision: "APPROVE",
+      failureClass: "authority_invalidated",
+      status: "failed"
+    });
+    await expect(recovery.persistence.getAuthoritativeReview(candidate.task.id, candidate.candidate.commit)).resolves.toBeUndefined();
+    expect(harness.executions).toHaveLength(1);
+  });
+
   it("recovers a durably cleaned finalizing review exactly once without policy/session memory", async () => {
     const fixture = await repositoryFixture();
     const candidate = await candidateReady(fixture);

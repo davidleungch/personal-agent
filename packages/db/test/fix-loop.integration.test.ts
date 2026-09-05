@@ -449,6 +449,23 @@ describe("Phase 2C durable fix-loop authority", () => {
       task: { needsHumanReason: "non_convergence" }
     });
 
+    const rawGrowth = await initialCandidate();
+    review = await reviewCandidate(rawGrowth.task.id, "REQUEST_CHANGES", [
+      finding({ text: "A" }),
+      finding({ text: "B" })
+    ]);
+    fix = createFixLoopRepositories(database);
+    await fix.reconcileCurrentReview({ reviewId: review.id });
+    await captureFix(rawGrowth.task.id, "raw-growth-fix");
+    review = await reviewCandidate(rawGrowth.task.id, "REQUEST_CHANGES", [
+      finding({ text: "C" }),
+      finding({ text: "C" }),
+      finding({ text: "D" })
+    ]);
+    await expect(fix.reconcileCurrentReview({ reviewId: review.id })).resolves.toMatchObject({
+      task: { needsHumanReason: "non_convergence", status: "needs_human" }
+    });
+
     const equivalent = await initialCandidate();
     review = await reviewCandidate(equivalent.task.id, "REQUEST_CHANGES", [finding({ text: "equivalent" })]);
     await expect(createFixLoopRepositories(database).reconcileCurrentReview({

@@ -459,6 +459,22 @@ export class ReviewerCoordinator {
       sandboxId: review.sandboxId,
       workspacePath: this.dependencies.git.workspacePath(review.id)
     });
+    if (review.authorityInvalidated) {
+      await this.dependencies.persistence.recordReviewFailure({
+        ...fence,
+        failureClass: "authority_invalidated",
+        now: new Date()
+      });
+      if (review.cleanupStatus !== "succeeded") {
+        await this.cleanup(fence, workspace);
+      }
+      return this.dependencies.persistence.completeReviewFailure({
+        ...fence,
+        now: new Date(),
+        safeSummary: "Reviewer authority was invalidated; cleanup completed without an authoritative decision"
+      });
+    }
+
     const recoverableProposal =
       review.status === "finalizing" &&
       review.decision &&

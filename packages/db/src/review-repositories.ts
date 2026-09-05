@@ -49,6 +49,10 @@ async function freshDatabaseTime(transaction: ReviewTransaction): Promise<Date> 
   return z.coerce.date().parse(result.rows[0]?.databaseNow);
 }
 
+function reviewTaskAuthorityInvalidated(task: { authorityInvalidatedAt: Date | null; status: string } | undefined): boolean {
+  return task?.authorityInvalidatedAt !== null || task?.status === "blocked";
+}
+
 function addUsage(current: DevelopmentUsage, delta: DevelopmentUsage): DevelopmentUsage {
   return {
     commandMs: current.commandMs + delta.commandMs,
@@ -365,7 +369,7 @@ export function createReviewRepositories(
     }) => {
       const fence = fenceSchema.parse(input);
       return database.transaction(async (transaction) => {
-        const { attempt, databaseNow, review } = await lockedReview(transaction, fence);
+        const { attempt, databaseNow, review, task } = await lockedReview(transaction, fence);
         if (
           review.cleanupStatus !== "succeeded" ||
           !(
@@ -388,7 +392,7 @@ export function createReviewRepositories(
         const needsHumanReason = input.needsHumanReason
           ? developmentNeedsHumanReasonSchema.parse(input.needsHumanReason)
           : undefined;
-        if (needsHumanReason) {
+        if (needsHumanReason && !reviewTaskAuthorityInvalidated(task)) {
           if (!attempt?.fixIteration) {
             throw new DevelopmentTransitionError("Only a fix-candidate review can require Phase 2C human action");
           }
@@ -567,7 +571,11 @@ export function createReviewRepositories(
           }
           throw new DevelopmentTransitionError("A different Reviewer proposal is already durable");
         }
-        if (review.status !== "reviewing" || !review.contextDigest) {
+        if (
+          review.status !== "reviewing" ||
+          !review.contextDigest ||
+          reviewTaskAuthorityInvalidated(task)
+        ) {
           throw new DevelopmentTransitionError("Reviewer proposal is not allowed in the current state");
         }
         const criterionIds = new Set(
@@ -607,10 +615,11 @@ export function createReviewRepositories(
       const fence = fenceSchema.parse(input);
       const failureClass = shortText.parse(input.failureClass);
       return database.transaction(async (transaction) => {
-        const { attempt, databaseNow, review } = await lockedReview(transaction, fence);
+        const { attempt, databaseNow, review, task } = await lockedReview(transaction, fence);
         if (
           !attempt?.fixIteration ||
           review.decision ||
+          reviewTaskAuthorityInvalidated(task) ||
           review.infrastructureRetryCount >= 2 ||
           review.cleanupStatus !== "succeeded" ||
           !["preparing", "reviewing", "interrupted"].includes(review.status)
@@ -670,7 +679,11 @@ export function createReviewRepositories(
           .where(eq(developmentTasks.id, candidate.taskId))
           .limit(1)
           .for("update", { skipLocked: true });
-        if (!task || task.status !== "candidate_ready") return undefined;
+        if (
+          !task ||
+          (task.status !== "candidate_ready" &&
+            !(task.status === "blocked" && task.authorityInvalidatedAt !== null))
+        ) return undefined;
         await transaction
           .select()
           .from(developmentAttempts)
@@ -710,7 +723,11 @@ export function createReviewRepositories(
           safeMetadata: { lease_generation: leaseGeneration, reason: "lease_expired", to_status: status },
           status: "unknown"
         });
-        return updated!;
+        return {
+          ...updated!,
+          authorityInvalidated: task.authorityInvalidatedAt !== null || task.status === "blocked",
+          taskStatus: task.status
+        };
       });
     },
 
@@ -859,8 +876,8 @@ export function createReviewRepositories(
     }) => {
       const fence = fenceSchema.parse(input);
       return database.transaction(async (transaction) => {
-        const { databaseNow, review } = await lockedReview(transaction, fence);
-        if (review.status !== "preparing" || !review.contextDigest) {
+        const { databaseNow, review, task } = await lockedReview(transaction, fence);
+        if (review.status !== "preparing" || !review.contextDigest || reviewTaskAuthorityInvalidated(task)) {
           throw new DevelopmentTransitionError("Review execution cannot start in the current state");
         }
         const [updated] = await transaction
