@@ -230,6 +230,48 @@ const policy = {
 };
 
 describe("Phase 2A trusted development coordinator", () => {
+  it("aborts execution and rejects completion when heartbeat persistence fails", async () => {
+    const fixture = await repositoryFixture();
+    const failure = new Error("Heartbeat persistence unavailable");
+    const harness = new FakeHarness();
+    const setup = coordinator({ fixture, harness });
+    const checks = vi.spyOn(setup.manager, "execute");
+    const capture = vi.spyOn(fixture.git, "verifyCandidateRef");
+    vi.spyOn(harness, "execute").mockImplementation(async (input) => {
+      const signal = input.signal!;
+      async function* stream(): AsyncGenerator<DevelopmentEvent> {
+        yield { kind: "execution_started", safeMetadata: {} };
+        vi.spyOn(setup.persistence, "renewDevelopmentLease").mockRejectedValue(failure);
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        expect(signal.aborted).toBe(true);
+        yield { kind: "completed", result: "completion_proposed", safeMetadata: {} };
+      }
+      return { events: stream(), executionId: "heartbeat-failure-execution" };
+    });
+    const task = await setup.coordinator.createApprovedTask({
+      acceptanceCriteria: criteria,
+      approvedSpec: "Stop execution when durable lease renewal is unavailable",
+      baseReference: fixture.base,
+      title: "Heartbeat persistence failure"
+    });
+    await expect(setup.coordinator.runOne(
+      { ...policy, leaseDurationMs: 3_000 },
+      { taskId: task.id }
+    )).rejects.toBe(failure);
+    expect(harness.aborts).toEqual(["heartbeat-failure-execution"]);
+    expect(checks).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    expect(setup.manager.tornDown).toEqual(setup.manager.created);
+    const attempts = await setup.persistence.listDevelopmentAttempts(task.id);
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({ status: "failed", candidateCommit: null });
+    await expect(setup.persistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
+      status: "failed"
+    });
+  });
+
   it("runs the complete small-task slice through the real isolated Docker sandbox", async () => {
     const fixture = await repositoryFixture();
     const persistence = createDevelopmentRepositories(database);

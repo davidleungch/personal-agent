@@ -649,7 +649,7 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     expect(events.filter((event) => event.kind === "finalization" && event.status === "success")).toHaveLength(1);
   });
 
-  it("covers heartbeat fencing, duplicate/no-result output, tool audit, and context binding changes", async () => {
+  it("fences a Reviewer after a failed heartbeat", async () => {
     const heartbeatFixture = await repositoryFixture();
     await candidateReady(heartbeatFixture);
     const heartbeatHarness = new FakeReviewerHarness({ decision: "APPROVE", findings: [] }, async () => {
@@ -660,6 +660,9 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     await expect(heartbeat.coordinator.runOne({ ...policy, leaseDurationMs: 900 })).rejects.toBeInstanceOf(DevelopmentLeaseError);
     expect(heartbeatHarness.executions).toHaveLength(1);
 
+  });
+
+  it("rejects missing, duplicate, and malformed Reviewer output", async () => {
     for (const kind of ["none", "duplicate", "malformed"] as const) {
       const fixture = await repositoryFixture();
       await candidateReady(fixture);
@@ -696,6 +699,9 @@ describe("Phase 2B independent Reviewer coordinator", () => {
       await expect(coordinator.runOne(policy)).rejects.toBeDefined();
     }
 
+  });
+
+  it("rejects an early review retention identity mismatch", async () => {
     const earlyRetentionFixture = await repositoryFixture();
     const earlyRetentionCandidate = await candidateReady(earlyRetentionFixture);
     const earlyRetention = setup({ fixture: earlyRetentionFixture, runnerId: "early-retention-mismatch" });
@@ -705,6 +711,9 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     });
     await expect(earlyRetention.coordinator.runOne(policy)).rejects.toThrow("retention identity");
 
+  });
+
+  it("rejects a late review retention identity mismatch", async () => {
     const lateRetentionFixture = await repositoryFixture();
     const lateRetentionCandidate = await candidateReady(lateRetentionFixture);
     const lateRetention = setup({ fixture: lateRetentionFixture, runnerId: "late-retention-mismatch" });
@@ -725,18 +734,27 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     );
     await expect(lateRetention.coordinator.runOne(policy)).rejects.toThrow("retention identity");
 
+  });
+
+  it("rejects missing durable Reviewer context", async () => {
     const missingContextFixture = await repositoryFixture();
     await candidateReady(missingContextFixture);
     const missingContext = setup({ fixture: missingContextFixture, runnerId: "missing-durable-context" });
     vi.spyOn(missingContext.persistence, "getReviewContextInput").mockResolvedValueOnce(undefined);
     await expect(missingContext.coordinator.runOne(policy)).rejects.toThrow("context input disappeared");
 
+  });
+
+  it("rejects changed Reviewer workspace identity", async () => {
     const workspaceFixture = await repositoryFixture();
     await candidateReady(workspaceFixture);
     const workspace = setup({ fixture: workspaceFixture, runnerId: "workspace-identity" });
     vi.spyOn(workspaceFixture.git, "createWorktree").mockResolvedValueOnce("/tmp/wrong-review-workspace");
     await expect(workspace.coordinator.runOne(policy)).rejects.toThrow("identity changed");
 
+  });
+
+  it("rejects changed Reviewer context authority", async () => {
     const contextFixture = await repositoryFixture();
     await candidateReady(contextFixture);
     const context = setup({ fixture: contextFixture, runnerId: "context-change" });
@@ -749,6 +767,9 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     });
     await expect(context.coordinator.runOne(policy)).rejects.toThrow("context authority changed");
 
+  });
+
+  it("finalizes from verified durable Reviewer context", async () => {
     const finalContextFixture = await repositoryFixture();
     await candidateReady(finalContextFixture);
     const finalContext = setup({ fixture: finalContextFixture, runnerId: "pure-durable-finalization" });
@@ -792,38 +813,39 @@ describe("Phase 2B independent Reviewer coordinator", () => {
     }
   });
 
-  it("fails closed when proposal persistence, audit, abort, failure recording, or finalization fails", async () => {
-    for (const failure of ["proposal", "audit", "record_failure", "stale_failure", "finalization", "stale_finalization", "cleanup_audit"] as const) {
-      const fixture = await repositoryFixture();
-      const candidate = await candidateReady(fixture);
-      const manager = new FakeSandboxManager();
-      if (failure === "cleanup_audit") manager.teardownFailures = 1;
-      const review = setup({ fixture, manager, runnerId: `persistence-${failure}` });
-      if (failure === "proposal") {
-        vi.spyOn(review.persistence, "persistReviewProposal").mockRejectedValueOnce(new Error("proposal persistence failed"));
-      } else if (failure === "audit") {
-        vi.spyOn(review.persistence, "appendReviewEvent").mockRejectedValueOnce(new Error("audit persistence failed"));
-      } else if (failure === "record_failure" || failure === "stale_failure") {
-        vi.spyOn(review.persistence, "appendReviewEvent").mockRejectedValueOnce(new Error("trigger failure handling"));
-        vi.spyOn(review.persistence, "recordReviewFailure").mockRejectedValueOnce(
-          failure === "stale_failure"
-            ? new DevelopmentLeaseError("stale failure recording")
-            : new Error("failure audit failed")
-        );
-      } else if (failure === "finalization") {
-        vi.spyOn(review.persistence, "finalizeReview").mockRejectedValueOnce(new Error("finalization persistence failed"));
-      } else if (failure === "stale_finalization") {
-        vi.spyOn(review.persistence, "finalizeReview").mockRejectedValueOnce(new DevelopmentLeaseError("stale finalization"));
-      } else {
-        vi.spyOn(review.persistence, "recordReviewCleanup").mockRejectedValue(new Error("cleanup audit failed"));
-      }
-      await expect(review.coordinator.runOne(policy)).rejects.toBeDefined();
-      const row = await database.query.developmentReviews.findFirst({
-        where: (reviews, { eq }) => eq(reviews.taskId, candidate.task.id)
-      });
-      expect(row?.status).not.toBe("succeeded");
+  it.each(["proposal", "audit", "record_failure", "stale_failure", "finalization", "stale_finalization", "cleanup_audit"] as const)(
+    "fails closed for Reviewer %s persistence failure", async (failure) => {
+    const fixture = await repositoryFixture();
+    const candidate = await candidateReady(fixture);
+    const manager = new FakeSandboxManager();
+    if (failure === "cleanup_audit") manager.teardownFailures = 1;
+    const review = setup({ fixture, manager, runnerId: `persistence-${failure}` });
+    if (failure === "proposal") {
+      vi.spyOn(review.persistence, "persistReviewProposal").mockRejectedValueOnce(new Error("proposal persistence failed"));
+    } else if (failure === "audit") {
+      vi.spyOn(review.persistence, "appendReviewEvent").mockRejectedValueOnce(new Error("audit persistence failed"));
+    } else if (failure === "record_failure" || failure === "stale_failure") {
+      vi.spyOn(review.persistence, "appendReviewEvent").mockRejectedValueOnce(new Error("trigger failure handling"));
+      vi.spyOn(review.persistence, "recordReviewFailure").mockRejectedValueOnce(
+        failure === "stale_failure"
+          ? new DevelopmentLeaseError("stale failure recording")
+          : new Error("failure audit failed")
+      );
+    } else if (failure === "finalization") {
+      vi.spyOn(review.persistence, "finalizeReview").mockRejectedValueOnce(new Error("finalization persistence failed"));
+    } else if (failure === "stale_finalization") {
+      vi.spyOn(review.persistence, "finalizeReview").mockRejectedValueOnce(new DevelopmentLeaseError("stale finalization"));
+    } else {
+      vi.spyOn(review.persistence, "recordReviewCleanup").mockRejectedValue(new Error("cleanup audit failed"));
     }
+    await expect(review.coordinator.runOne(policy)).rejects.toBeDefined();
+    const row = await database.query.developmentReviews.findFirst({
+      where: (reviews, { eq }) => eq(reviews.taskId, candidate.task.id)
+    });
+    expect(row?.status).not.toBe("succeeded");
+  });
 
+  it("fails closed when Reviewer abort fails", async () => {
     const abortFixture = await repositoryFixture();
     await candidateReady(abortFixture);
     const abortHarness = new FakeReviewerHarness("provider");

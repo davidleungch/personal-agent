@@ -22,33 +22,40 @@ export class FixLoopCoordinator {
       // A process can die after reconciliation and before the fix starts.
       return this.dependencies.persistence.markStrandedFixRequired();
     }
-    const candidate = await this.dependencies.git.verifyCandidateRef(
-      current.attempt.id,
-      current.attempt.baseCommit,
-      current.attempt.candidateCommit!
+    // Persistence failures are not evidence of invalid Git authority.
+    const attempts = await this.dependencies.developmentPersistence.listDevelopmentAttempts(
+      current.task.id
     );
-    const retained = await this.dependencies.git.verifyReviewRetentionRef(
-      current.review.id,
-      current.review.candidateCommit
-    );
-    if (!candidate || !retained || candidate.ref !== current.review.candidateRef) {
+    let equivalentCandidate = false;
+    try {
+      const candidate = await this.dependencies.git.verifyCandidateRef(
+        current.attempt.id,
+        current.attempt.baseCommit,
+        current.attempt.candidateCommit!
+      );
+      const retained = await this.dependencies.git.verifyReviewRetentionRef(
+        current.review.id,
+        current.review.candidateCommit
+      );
+      if (!candidate || !retained || candidate.ref !== current.review.candidateRef) {
+        throw new Error("Candidate/review Git authority is unavailable");
+      }
+      const currentTree = await this.dependencies.git.treeId(current.review.candidateCommit);
+      for (const attempt of attempts) {
+        if (attempt.id === current.attempt.id) continue;
+        if (await this.dependencies.git.treeId(attempt.candidateCommit!) === currentTree) {
+          equivalentCandidate = true;
+          break;
+        }
+      }
+    } catch {
+      // Git cannot prove authority, including when verification itself fails.
+      // Do not persist or expose raw Git errors, which can contain repository data.
       await this.dependencies.developmentPersistence.blockDevelopmentCandidateIntegrity({
         attemptId: current.attempt.id,
         now: new Date()
       });
       throw new Error("Current candidate/review Git authority is unavailable for reconciliation");
-    }
-    const currentTree = await this.dependencies.git.treeId(current.review.candidateCommit);
-    const attempts = await this.dependencies.developmentPersistence.listDevelopmentAttempts(
-      current.task.id
-    );
-    let equivalentCandidate = false;
-    for (const attempt of attempts) {
-      if (attempt.id === current.attempt.id) continue;
-      if (await this.dependencies.git.treeId(attempt.candidateCommit!) === currentTree) {
-        equivalentCandidate = true;
-        break;
-      }
     }
     return this.dependencies.persistence.reconcileCurrentReview({
       equivalentCandidate,

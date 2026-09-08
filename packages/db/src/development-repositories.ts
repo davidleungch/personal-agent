@@ -298,7 +298,16 @@ export function createDevelopmentRepositories(
         const [attempt] = await transaction
           .select()
           .from(developmentAttempts)
-          .where(eq(developmentAttempts.id, attemptId))
+          // The task lock serializes attempt creation and candidate advancement.
+          // Recheck freshness here; the caller's Git lookup may predate a new fix.
+          .where(and(
+            eq(developmentAttempts.id, attemptId),
+            sql`not exists (
+              select 1 from development_attempts later_attempt
+              where later_attempt.task_id = ${developmentAttempts.taskId}
+                and later_attempt.attempt_number > ${developmentAttempts.attemptNumber}
+            )`
+          ))
           .limit(1)
           .for("update");
         if (

@@ -12,6 +12,7 @@ import {
 } from "@personal-agent/db";
 import { emptyDevelopmentUsage, type DevelopmentReviewResult } from "@personal-agent/shared";
 import { Pool } from "pg";
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { DevelopmentEvent, DevelopmentHarness, DevelopmentHarnessInput } from "../src/contract";
@@ -216,9 +217,9 @@ class ScriptedHarness implements DevelopmentHarness {
   }
 }
 
-function setup(fixture: Awaited<ReturnType<typeof repositoryFixture>>, harness: ScriptedHarness, manager = new FakeSandboxManager()) {
-  const developmentPersistence = createDevelopmentRepositories(database);
-  const reviews = createReviewRepositories(database);
+function setup(fixture: Awaited<ReturnType<typeof repositoryFixture>>, harness: ScriptedHarness, manager = new FakeSandboxManager(), persistenceDatabase = database) {
+  const developmentPersistence = createDevelopmentRepositories(persistenceDatabase);
+  const reviews = createReviewRepositories(persistenceDatabase);
   const developmentCompiler = new DevelopmentContextCompiler(fixture.git);
   const development = new DevelopmentCoordinator({
     contextCompiler: developmentCompiler,
@@ -238,7 +239,7 @@ function setup(fixture: Awaited<ReturnType<typeof repositoryFixture>>, harness: 
     runnerId: "phase-2c-reviewer",
     sandboxManager: manager
   });
-  const fixPersistence = createFixLoopRepositories(database);
+  const fixPersistence = createFixLoopRepositories(persistenceDatabase);
   const fix = new FixLoopCoordinator({
     developmentPersistence,
     git: fixture.git,
@@ -257,6 +258,96 @@ function setup(fixture: Awaited<ReturnType<typeof repositoryFixture>>, harness: 
 }
 
 describe("Phase 2C bounded coordinator", () => {
+  it.each([false, true])("rejects stale Git blocking after a new candidate (task lock contention: %s)", async (contended) => {
+    const fixture = await repositoryFixture();
+    const harness = new ScriptedHarness();
+    harness.failFirstFix = false;
+    const system = setup(fixture, harness);
+    const task = await system.development.createApprovedTask({
+      acceptanceCriteria: criteria,
+      approvedSpec: "Diagnose current candidate authority without changing policy.",
+      baseReference: fixture.base,
+      title: "Delayed integrity diagnostic"
+    });
+    const old = (await system.development.runOne(implementationPolicy, { taskId: task.id }))!;
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    let rejectOld!: (error: Error) => void;
+    vi.spyOn(fixture.git, "verifyCandidateRef").mockImplementationOnce(() => {
+      entered();
+      return new Promise((_, reject) => { rejectOld = reject; });
+    });
+    const delayed = system.fix.reconcileOne();
+    const rejected = expect(delayed).rejects.toThrow("Candidate integrity blocking is not allowed in the current state");
+    await waiting;
+    const advance = async (systemB: ReturnType<typeof setup>) => {
+      await expect(systemB.fix.reconcileOne()).resolves.toMatchObject({ task: { status: "fix_required" } });
+      return (await systemB.development.runOne(implementationPolicy, { fixOnly: true, taskId: task.id }))!;
+    };
+    const newer = contended ? await database.transaction(async (transaction) => {
+      const systemB = setup(fixture, harness, undefined, transaction as unknown as Database);
+      const candidate = await advance(systemB);
+      const pid = (await transaction.execute(sql`select pg_backend_pid() as pid`)).rows[0]!.pid;
+      // B and its candidate_ready transition are still invisible outside this transaction.
+      expect(await system.developmentPersistence.listDevelopmentAttempts(task.id)).toHaveLength(1);
+      rejectOld(new Error("Delayed Git verification failure for superseded attempt"));
+      await vi.waitFor(async () => {
+        const waiting = await pool.query(
+          "select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid))", [pid]
+        );
+        expect(waiting.rowCount).toBeGreaterThan(0);
+      });
+      // A is waiting on B's task lock; the callback return commits B before A revalidates.
+      return candidate;
+    }) : await advance(system);
+    expect(newer.task.status).toBe("candidate_ready");
+    expect(newer.attempt.id).not.toBe(old.attempt.id);
+    await expect(fixture.git.verifyCandidateRef(newer.attempt.id, newer.attempt.baseCommit, newer.attempt.candidateCommit!)).resolves.toMatchObject({ commit: newer.attempt.candidateCommit });
+    if (!contended) rejectOld(new Error("Delayed Git verification failure for superseded attempt"));
+    await rejected;
+    const after = (await system.developmentPersistence.getDevelopmentTask(task.id))!;
+    expect(after.status).toBe("candidate_ready");
+    expect(after.authorityInvalidatedAt).toBeNull();
+    const attempts = await system.developmentPersistence.listDevelopmentAttempts(task.id);
+    expect(attempts.find((a) => a.id === old.attempt.id)?.failureClass).toBeNull();
+    expect(attempts.find((a) => a.id === newer.attempt.id)?.failureClass).toBeNull();
+    const events = await system.developmentPersistence.listDevelopmentAttemptEvents(old.attempt.id);
+    expect(events.some((event) => event.kind === "git" && event.status === "blocked")).toBe(false);
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    await expect(system.fix.reconcileOne()).resolves.toMatchObject({ task: { status: "approved_candidate" } });
+  });
+
+
+  it("does not create a fix attempt while another transaction holds its task lock", async () => {
+    const fixture = await repositoryFixture();
+    const harness = new ScriptedHarness();
+    harness.failFirstFix = false;
+    const system = setup(fixture, harness);
+    const task = await system.development.createApprovedTask({
+      acceptanceCriteria: criteria, approvedSpec: "Serialize fix creation with task authority.",
+      baseReference: fixture.base, title: "Fix claim task lock"
+    });
+    await system.development.runOne(implementationPolicy, { taskId: task.id });
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    await system.fix.reconcileOne();
+    const blocker = await pool.connect();
+    try {
+      await blocker.query("begin");
+      await blocker.query("select id from development_tasks where id = $1 for update", [task.id]);
+      await expect(system.development.runOne(implementationPolicy, { fixOnly: true, taskId: task.id })).resolves.toBeUndefined();
+      expect(await system.developmentPersistence.listDevelopmentAttempts(task.id)).toHaveLength(1);
+    } finally {
+      await blocker.query("rollback");
+      blocker.release();
+    }
+    await expect(system.development.runOne(implementationPolicy, { fixOnly: true, taskId: task.id })).resolves.toMatchObject({
+      attempt: { attemptNumber: 2 }, task: { status: "candidate_ready" }
+    });
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    await expect(system.fix.reconcileOne()).resolves.toMatchObject({ task: { status: "approved_candidate" } });
+  });
+
   it("repairs one rejected candidate with fresh retries and role-pure review reconciliation", async () => {
     const fixture = await repositoryFixture();
     const harness = new ScriptedHarness();
@@ -396,6 +487,109 @@ describe("Phase 2C bounded coordinator", () => {
       reviewId: current.review.id
     });
   });
+
+  it.each([
+    "candidate mismatch", "retention mismatch", "current tree", "historical tree",
+    "missing candidate", "missing retention"
+  ] as const)("durably blocks reconciliation for %s authority failure", async (failure) => {
+    const fixture = await repositoryFixture();
+    const harness = new ScriptedHarness();
+    harness.failFirstFix = false;
+    const system = setup(fixture, harness);
+    const task = await system.development.createApprovedTask({
+      acceptanceCriteria: criteria,
+      approvedSpec: "Preserve exact candidate authority during reconciliation.",
+      baseReference: fixture.base,
+      title: "Git reconciliation failure"
+    });
+    const initial = (await system.development.runOne(implementationPolicy, { taskId: task.id }))!;
+    await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    if (failure === "historical tree") {
+      await system.fix.reconcileOne();
+      await system.development.runOne(implementationPolicy, { fixOnly: true, taskId: task.id });
+      await system.reviewer.runOne(reviewPolicy, { taskId: task.id });
+    }
+    const current = (await system.fixPersistence.findCurrentReviewForReconciliation())!;
+    expect(current.task).toMatchObject({ id: task.id, status: "candidate_ready" });
+    const before = await system.developmentPersistence.listDevelopmentAttempts(task.id);
+    const invocations = harness.inputs.length;
+    const reconcile = vi.spyOn(system.fixPersistence, "reconcileCurrentReview");
+    if (failure === "candidate mismatch" || failure === "retention mismatch") {
+      const ref = failure === "candidate mismatch"
+        ? current.review.candidateRef : fixture.git.reviewRetentionRef(current.review.id);
+      execFileSync("git", ["update-ref", ref, fixture.base], { cwd: fixture.repository });
+    } else if (failure === "missing candidate" || failure === "missing retention") {
+      const ref = failure === "missing candidate"
+        ? current.review.candidateRef : fixture.git.reviewRetentionRef(current.review.id);
+      execFileSync("git", ["update-ref", "-d", ref], { cwd: fixture.repository });
+    } else {
+      const treeId = fixture.git.treeId.bind(fixture.git);
+      const brokenCommit = failure === "current tree"
+        ? current.review.candidateCommit : initial.attempt.candidateCommit;
+      vi.spyOn(fixture.git, "treeId").mockImplementation(async (commit) => {
+        if (commit === brokenCommit) throw new Error("Git failed: fake-private-repository-canary");
+        return treeId(commit);
+      });
+    }
+    await expect(system.fix.reconcileOne()).rejects.toThrow(new Error(
+      "Current candidate/review Git authority is unavailable for reconciliation"
+    ));
+    expect(reconcile).not.toHaveBeenCalled();
+    await expect(system.developmentPersistence.getDevelopmentTask(task.id)).resolves.toMatchObject({
+      status: "blocked"
+    });
+    const after = await system.developmentPersistence.listDevelopmentAttempts(task.id);
+    expect(after.map(({ id, candidateCommit, candidateRef, sourceReviewId }) => ({
+      id, candidateCommit, candidateRef, sourceReviewId
+    }))).toEqual(before.map(({ id, candidateCommit, candidateRef, sourceReviewId }) => ({
+      id, candidateCommit, candidateRef, sourceReviewId
+    })));
+    expect(after.find((attempt) => attempt.id === current.attempt.id)).toMatchObject({
+      failureClass: "candidate_integrity", status: "succeeded"
+    });
+    const events = await system.developmentPersistence.listDevelopmentAttemptEvents(current.attempt.id);
+    expect(events.at(-1)).toMatchObject({
+      kind: "git", status: "blocked", safeMetadata: { failure_class: "candidate_integrity" }
+    });
+    expect(JSON.stringify({ after, events })).not.toContain("fake-private-repository-canary");
+    await expect(system.fix.reconcileOne()).resolves.toBeUndefined();
+    expect(harness.inputs).toHaveLength(invocations);
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it.each(["lookup", "list", "reconcile", "block"] as const)(
+    "propagates %s persistence failures without reclassifying them as Git failures",
+    async (failure) => {
+      const error = new Error("Persistence unavailable");
+      const current = {
+        attempt: { id: "attempt", baseCommit: "base", candidateCommit: "candidate" },
+        review: { id: "review", candidateCommit: "candidate", candidateRef: "ref" },
+        task: { id: "task" }
+      };
+      const developmentPersistence = {
+        blockDevelopmentCandidateIntegrity: vi.fn().mockRejectedValue(error),
+        listDevelopmentAttempts: vi.fn().mockResolvedValue([])
+      };
+      const persistence = {
+        findCurrentReviewForReconciliation: vi.fn().mockResolvedValue(current),
+        reconcileCurrentReview: vi.fn().mockRejectedValue(error)
+      };
+      const git = {
+        treeId: vi.fn().mockResolvedValue("tree"),
+        verifyCandidateRef: vi.fn().mockResolvedValue({ commit: "candidate", ref: "ref" }),
+        verifyReviewRetentionRef: vi.fn().mockResolvedValue({ commit: "candidate", ref: "retained" })
+      };
+      if (failure === "lookup") persistence.findCurrentReviewForReconciliation.mockRejectedValue(error);
+      if (failure === "list") developmentPersistence.listDevelopmentAttempts.mockRejectedValue(error);
+      if (failure === "block") git.verifyCandidateRef.mockRejectedValue(new Error("Git unavailable"));
+      const coordinator = new FixLoopCoordinator({ developmentPersistence, git, persistence } as never);
+      await expect(coordinator.reconcileOne()).rejects.toBe(error);
+      expect(developmentPersistence.blockDevelopmentCandidateIntegrity).toHaveBeenCalledTimes(
+        failure === "block" ? 1 : 0
+      );
+      expect(persistence.reconcileCurrentReview).toHaveBeenCalledTimes(failure === "reconcile" ? 1 : 0);
+    }
+  );
 
   it("alternates role-pure coordinators without owning durable state", async () => {
     const states = ["fix_required", "approved_candidate"];
