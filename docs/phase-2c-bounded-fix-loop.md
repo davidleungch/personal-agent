@@ -2,7 +2,13 @@
 
 ## Status
 
-Phase 2C is authorized for design and implementation only after Phase 2B is complete.
+Phase 2C v1 is **COMPLETE / ACCEPTED** following final independent acceptance at
+exact implementation checkpoint `9348e270842ed4ec1b7b3ffe36b8760fc7bd3cfb`.
+The [Phase 2C v1 completion record](phase-2-implementation-plan.md#phase-2c-v1-completion-record)
+records the acceptance evidence and stop boundary.
+
+Phase 2D has not started and requires separate human authorization; it remains
+**NOT AUTHORIZED**. Phase 3 remains **NOT STARTED / NOT AUTHORIZED**.
 
 Phase 2C does not authorize merge, push, deployment, self-generated tasks, specification changes, or Phase 3 self-improvement.
 
@@ -11,7 +17,9 @@ Phase 2C does not authorize merge, push, deployment, self-generated tasks, speci
 This is a human-approved scope refinement from **automatic restart-safe continuation**
 to **restart-safe authority preservation + deterministic fail-closed escalation**.
 Candidate E was rejected under the superseded stronger recovery contract; that
-review is not being reinterpreted. Phase 2C v1 requires bounded autonomous work
+review is not being reinterpreted. Earlier candidates also remain rejected under
+their applicable contracts; v1 acceptance does not retrospectively approve them.
+Phase 2C v1 requires bounded autonomous work
 only while an execution has an active lease. It does not require automatic
 continuation after arbitrary process or machine crashes, multi-worker takeover,
 or ambiguous external-resource ownership.
@@ -25,9 +33,10 @@ container teardown are operational cleanup debt, not candidate authority.
 
 Recovery does not reuse or destructively clean up an expired worker's workspace
 or container. It performs no autonomous fix continuation after lease loss.
-Full autonomous crash recovery, generation-fenced external resources, and
-exactly-once external cleanup are explicitly deferred to a later authorized
-hardening phase.
+Full autonomous crash continuation, including workspace/container takeover,
+generation-fenced external resources, exactly-once external cleanup, and
+Temporal-style durable orchestration, remains intentionally deferred to a later
+explicitly human-authorized hardening phase.
 
 ## Objective
 
@@ -198,7 +207,7 @@ Minor findings may be included according to policy, but autonomous progress must
 
 # 7. Autonomous Retry Budget
 
-Default maximum:
+The accepted v1 autonomous semantic fix budget remains exactly three attempts:
 
 ```text
 max_fix_iterations = 3
@@ -229,7 +238,8 @@ When the maximum is exhausted:
 needs_human
 ```
 
-No fourth autonomous fix attempt may start without explicit human authorization.
+No autonomous Fix Attempt 4 is authorized. Any budget change requires separate
+explicit human authorization; this acceptance does not reset or expand the budget.
 
 ---
 

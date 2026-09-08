@@ -12,11 +12,11 @@ Current status:
 | Phase or milestone | Status |
 | --- | --- |
 | Phase 1 — ACT | **COMPLETE** |
-| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C IMPLEMENTATION** |
+| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C v1 ACCEPTED; STOPPED BEFORE PHASE 2D** |
 | Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
 | Phase 2B — Independent Reviewer | **COMPLETE** |
-| Phase 2C — Autonomous Fix Loop | **IN PROGRESS / IMPLEMENTATION AUTHORIZED** |
-| Phase 2D — Auto-Merge + Deploy | **NOT STARTED** |
+| Phase 2C — Autonomous Fix Loop | **v1 COMPLETE / ACCEPTED** |
+| Phase 2D — Auto-Merge + Deploy | **NOT STARTED / NOT AUTHORIZED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
 
@@ -807,14 +807,15 @@ exactly 100% for statements, branches, functions, and lines; and Node 22.19.0
 validation passed. No Phase 2C, merge, push, deployment, or Phase 3 authority was
 present during acceptance.
 
-Phase 2C implementation is explicitly authorized and in progress. It is not
-complete until independent acceptance occurs.
+Phase 2C implementation was separately authorized after Phase 2B. Its v1 final
+independent acceptance is recorded below.
 
 # Phase 2C — Autonomous Fix Loop
 
 [`phase-2c-bounded-fix-loop.md`](phase-2c-bounded-fix-loop.md) is the governing
-contract for the authorized implementation. Phase 2C remains **IN PROGRESS** and
-must not be marked complete by its Implementer session.
+contract for the accepted implementation. Phase 2C v1 is **COMPLETE / ACCEPTED**
+at exact implementation checkpoint
+`9348e270842ed4ec1b7b3ffe36b8760fc7bd3cfb`, following final independent acceptance.
 
 ## Contract
 
@@ -859,7 +860,64 @@ ambiguous interrupted state, and no long-lived session dependency. It does not
 require automatic process/machine restart continuation, workspace/container
 reuse, or exactly-once external cleanup. Stop for separate Phase 2D authorization.
 
+## Phase 2C v1 completion record
+
+Phase 2C v1 is **COMPLETE / ACCEPTED**. The accepted implementation checkpoint is
+exactly `9348e270842ed4ec1b7b3ffe36b8760fc7bd3cfb`. This documentation-only
+closeout records the user's final independent acceptance; it does not replace
+that implementation checkpoint with the closeout commit.
+
+The accepted recovery contract is:
+
+> restart-safe authority preservation + deterministic fail-closed escalation
+
+Full autonomous crash continuation remains intentionally deferred to separately
+human-authorized work, including:
+
+- workspace/container takeover;
+- generation-fenced external resources;
+- exactly-once external cleanup; and
+- Temporal-style durable orchestration.
+
+The autonomous semantic fix budget remains exactly **three attempts**
+(`max_fix_iterations = 3`). No autonomous **Fix Attempt 4** is authorized.
+Acceptance does not reset or expand that budget.
+
+Candidate E and earlier candidates remain rejected under their applicable
+contracts. Candidate E's rejection under the superseded stronger recovery
+contract is preserved; this v1 acceptance does not retrospectively approve any
+rejected candidate.
+
+Final acceptance evidence supplied by the user:
+
+- fresh independent Reviewer decision: **APPROVE**; no Blocking or Major findings;
+- full tests: **282 passed, 3 skipped**;
+- coverage: exactly **100% statements / branches / functions / lines**;
+- PostgreSQL integration and concurrency validation: pass;
+- Docker Compose migration/startup/health/restart: pass;
+- sandbox validation: pass;
+- `linux/amd64` and `linux/arm64` OCI validation: pass;
+- lint/typecheck/build/Drizzle/Git/security/scope gates: pass; and
+- final Astra challenge: no Blocking, Major, or Minor findings; the previous
+  independent **APPROVE** should stand: **yes**.
+
+The Astra challenge was read-only and did not rerun acceptance gates. This was
+expected: the fresh independent Reviewer had already performed the complete
+deterministic validation. This docs-only closeout does not rerun or claim new
+implementation acceptance evidence.
+
+Phase 2D has **NOT STARTED / NOT BEEN AUTHORIZED** and still requires separate
+human authorization. Phase 3 remains **NOT STARTED / NOT AUTHORIZED**. No merge,
+deployment, self-generated task, or self-improvement authority is added by this
+closeout; integrated Phase 2 acceptance remains pending.
+
+Non-blocking follow-up housekeeping: `.github/workflows/ci.yml` still pins Node
+`22.18.0`, while the repository requires `22.19.0`. Correcting that drift is
+outside this docs-only closeout and is not performed here.
+
 # Phase 2D — Auto-Merge and Deploy
+
+**NOT STARTED / NOT AUTHORIZED** — separate human authorization is required.
 
 ## Contract
 
