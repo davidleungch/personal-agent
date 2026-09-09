@@ -12,11 +12,12 @@ Current status:
 | Phase or milestone | Status |
 | --- | --- |
 | Phase 1 — ACT | **COMPLETE** |
-| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C v1 ACCEPTED; STOPPED BEFORE PHASE 2D** |
+| Phase 2 — EVOLVE | **IN PROGRESS — PHASE 2C v1 ACCEPTED; PHASE 2D v1 CONTRACT APPROVED** |
 | Phase 2A — Development Harness Spike | **COMPLETE (2026-08-28)** |
 | Phase 2B — Independent Reviewer | **COMPLETE** |
 | Phase 2C — Autonomous Fix Loop | **v1 COMPLETE / ACCEPTED** |
-| Phase 2D — Auto-Merge + Deploy | **NOT STARTED / NOT AUTHORIZED** |
+| Phase 2D — Auto-Merge + Deploy | **v1 CONTRACT APPROVED; IMPLEMENTATION AUTHORIZED AFTER PROMOTION COMMIT; NOT STARTED** |
+| Phase 2D live activation | **NOT AUTHORIZED** |
 | Phase 2 Acceptance | **NOT STARTED** |
 | Phase 3 — Self-Improvement | **NOT STARTED / NOT AUTHORIZED** |
 
@@ -917,50 +918,45 @@ outside this docs-only closeout and is not performed here.
 
 # Phase 2D — Auto-Merge and Deploy
 
-**NOT STARTED / NOT AUTHORIZED** — separate human authorization is required.
+## Human-approved v1 contract — 2026-09-09
 
-## Contract
+The governing contract is [Phase 2D v1 — Exact-Candidate Merge and Bounded
+Deployment](phase-2d-merge-deploy.md), with the merge/deploy policy decision in
+[ADR 0002](decisions/0002-phase-2d-v1-merge-deploy.md). It promotes the accepted
+[proposal](proposals/phase-2d-contract-proposal.md) into durable authority.
 
-Phase 2D may advance an exact candidate only when all applicable predicates are
-true:
+| Boundary | Status |
+| --- | --- |
+| Phase 2D v1 contract/design | **APPROVED** |
+| Phase 2D v1 implementation | **AUTHORIZED only after this authority promotion is committed** |
+| Phase 2D live activation | **NOT AUTHORIZED** |
+| Phase 3 | **NOT AUTHORIZED** |
 
-```text
-approved specification is still current
-+ exact immutable candidate revision
-+ independent Reviewer = APPROVE for that revision
-+ CI = PASS for that revision
-+ lint = PASS
-+ typecheck = PASS
-+ build = PASS
-+ required unit/integration/E2E/migration/portability checks = PASS
-+ exactly 100% statements/branches/functions/lines coverage
-+ no unresolved blocking finding
-+ deterministic merge policy authorizes automation
-→ merge exact revision
-→ deploy exact merged revision
-→ verify migrations, health, and deployed revision
-```
+After that commit, implementation planning and implementation are ready for a
+separately scoped fresh session. This session is documentation-only and stops
+before implementation. Review and stop at every implementation milestone; no
+milestone completion implicitly authorizes the next or integrated acceptance.
 
-This milestone may add only the minimal CI-validation, merge, and deployment
-records necessary to bind evidence to exact commits and recover after restart.
-The merge gate must re-check current task/specification and repository state at
-the moment of merge. A model decision or Reviewer approval alone is never
-sufficient.
+The user approved H1/H2: exact-candidate original-base FF-only CAS merge,
+independent exact-SHA GitHub Actions publication/trigger/result import, one
+Linux Compose target, immutable C-bound app/worker artifacts, read-only migration
+ledger compatibility, no candidate-controlled or per-release privileged migration,
+durable bounded operations/reconciliation, stale-worker generation fencing,
+release-bound health verification, no automatic rollback and human escalation.
+Deterministic code owns authority; CI alone never creates merge/deploy permission.
+Model sessions receive no unrestricted merge/deploy credentials or Phase 3 path.
+The full predicates, identity chain, locks, states, limits, capability boundaries
+and A01–A29 acceptance matrix are normative in the governing contract.
 
-Merge and deployment run in trusted infrastructure outside coding-model and
-application-container authority. Coding models receive no merge token,
-deployment credential, host shell, Docker socket, or direct `main` access.
+Live activation requires separate confirmation of exact repository/target branch,
+one enrolled Linux host, exact Compose project, persistent volume identity and
+ownership, and verified credentials/capabilities. No production target is chosen
+and no production merge/deployment is authorized by this promotion.
 
-Deployment follows the exact merged revision through checkout, build, Compose
-apply, migration/result checks, health checks, and deployed-revision
-confirmation. Process/container startup alone is not success. Failure becomes
-durable state with a deterministic recovery decision; it does not silently claim
-completion or trigger unbounded model work.
-
-Acceptance proves the model cannot bypass review/CI/coverage/merge policy,
-cannot substitute a different commit after approval, and cannot declare deploy
-success without exact revision and health evidence. Stop for integrated Phase 2
-Acceptance.
+Phase 1/2A/2B/2C acceptance history is preserved verbatim. Earlier statements
+that Phase 2D was unauthorized describe those milestone closeouts; this later
+explicit human approval supersedes only their Phase 2D authorization status.
+It neither reopens Phase 2C nor changes its accepted recovery/budget contract.
 
 # Phase 2 Acceptance
 
