@@ -4,8 +4,14 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createDatabase,
+  ciValidationActions,
+  ciValidations,
   createRepositories,
+  developmentReleaseEvents,
+  developmentReleases,
   migrateDatabase,
+  phase2dEnvironments,
+  phase2dPolicies,
   automationRuns,
   developmentAttemptEvents,
   developmentAttempts,
@@ -70,15 +76,21 @@ describe("clean PostgreSQL migrations", () => {
     expect(tables.rows.map((row) => row.table_name)).toEqual([
       "automation_runs",
       "automations",
+      "ci_validation_actions",
+      "ci_validations",
       "command_requests",
       "development_attempt_events",
       "development_attempts",
+      "development_release_events",
+      "development_releases",
       "development_review_events",
       "development_reviews",
       "development_tasks",
       "evidence",
       "idempotency_records",
       "model_invocations",
+      "phase2d_environments",
+      "phase2d_policies",
       "run_events",
       "tool_calls"
     ]);
@@ -86,7 +98,7 @@ describe("clean PostgreSQL migrations", () => {
     const idColumns = await pool.query<{ column_default: string | null }>(
       "select column_default from information_schema.columns where table_schema = 'public' and column_name = 'id'"
     );
-    expect(idColumns.rows).toHaveLength(13);
+    expect(idColumns.rows).toHaveLength(19);
     expect(idColumns.rows.every((row) => row.column_default === null)).toBe(true);
 
     const timestampTypes = await pool.query<{ data_type: string }>(
@@ -107,6 +119,22 @@ describe("clean PostgreSQL migrations", () => {
     expect(getTableConfig(developmentReviews).foreignKeys).toHaveLength(2);
     expect(getTableConfig(developmentReviews).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[developmentTasks.id], [developmentAttempts.id]]);
     expect(getTableConfig(developmentReviewEvents).foreignKeys[0]?.reference().foreignColumns).toHaveLength(1);
+    expect(getTableConfig(phase2dEnvironments).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[phase2dPolicies.id]]);
+    expect(getTableConfig(ciValidations).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([
+      [developmentTasks.id],
+      [developmentAttempts.id],
+      [developmentReviews.id],
+      [phase2dPolicies.id]
+    ]);
+    expect(getTableConfig(ciValidationActions).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[ciValidations.id]]);
+    expect(getTableConfig(developmentReleases).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([
+      [developmentTasks.id],
+      [developmentAttempts.id],
+      [developmentReviews.id],
+      [ciValidations.id],
+      [phase2dPolicies.id]
+    ]);
+    expect(getTableConfig(developmentReleaseEvents).foreignKeys.map((key) => key.reference().foreignColumns)).toEqual([[developmentReleases.id]]);
   });
 });
 

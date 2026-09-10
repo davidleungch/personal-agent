@@ -658,3 +658,191 @@ export const developmentAttemptEvents = pgTable(
     )
   ]
 );
+
+export const phase2dPolicies = pgTable(
+  "phase2d_policies",
+  {
+    id: uuid().primaryKey(),
+    repositoryId: text("repository_id").notNull(),
+    remoteUrl: text("remote_url").notNull(),
+    targetRef: text("target_ref").default("refs/heads/main").notNull(),
+    environmentId: text("environment_id").notNull(),
+    policyRevision: text("policy_revision").notNull(),
+    policyDigest: text("policy_digest").notNull(),
+    authorityCatalogDigest: text("authority_catalog_digest").notNull(),
+    requiredChecksDigest: text("required_checks_digest").notNull(),
+    requiredCheckNames: jsonb("required_check_names").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    enabled: boolean().default(false).notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("phase2d_policies_repository_environment_unique").on(table.repositoryId, table.environmentId),
+    check("phase2d_policies_target_ref_check", sql`${table.targetRef} = 'refs/heads/main'`),
+    check("phase2d_policies_policy_digest_check", sql`${table.policyDigest} ~ '^[0-9a-f]{64}$'`),
+    check("phase2d_policies_authority_digest_check", sql`${table.authorityCatalogDigest} ~ '^[0-9a-f]{64}$'`),
+    check("phase2d_policies_checks_digest_check", sql`${table.requiredChecksDigest} ~ '^[0-9a-f]{64}$'`),
+    check("phase2d_policies_check_names_check", sql`jsonb_typeof(${table.requiredCheckNames}) = 'array' and jsonb_array_length(${table.requiredCheckNames}) > 0`)
+  ]
+);
+
+export const phase2dEnvironments = pgTable(
+  "phase2d_environments",
+  {
+    id: uuid().primaryKey(),
+    policyId: uuid("policy_id").notNull().references(() => phase2dPolicies.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    environmentId: text("environment_id").notNull(),
+    activeReleaseId: uuid("active_release_id"),
+    reservationReleaseId: uuid("reservation_release_id"),
+    reservationOperationId: text("reservation_operation_id"),
+    currentReleaseId: uuid("current_release_id"),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("phase2d_environments_environment_unique").on(table.environmentId),
+    unique("phase2d_environments_policy_environment_unique").on(table.policyId, table.environmentId)
+  ]
+);
+
+export const ciValidations = pgTable(
+  "ci_validations",
+  {
+    id: uuid().primaryKey(),
+    validationId: text("validation_id").notNull(),
+    taskId: uuid("task_id").notNull().references(() => developmentTasks.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    attemptId: uuid("attempt_id").notNull().references(() => developmentAttempts.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    reviewId: uuid("review_id").notNull().references(() => developmentReviews.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    policyId: uuid("policy_id").notNull().references(() => phase2dPolicies.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    repositoryId: text("repository_id").notNull(),
+    targetRef: text("target_ref").default("refs/heads/main").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    candidateCommit: text("candidate_commit").notNull(),
+    candidateRef: text("candidate_ref").notNull(),
+    policyRevision: text("policy_revision").notNull(),
+    policyDigest: text("policy_digest").notNull(),
+    authorityCatalogDigest: text("authority_catalog_digest").notNull(),
+    requiredChecksDigest: text("required_checks_digest").notNull(),
+    status: text().notNull(),
+    failureClass: text("failure_class"),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestampColumn("lease_expires_at"),
+    leaseGeneration: integer("lease_generation").default(1).notNull(),
+    deadlineAt: timestampColumn("deadline_at").notNull(),
+    infrastructureRetryCount: integer("infrastructure_retry_count").default(0).notNull(),
+    receipt: jsonb().$type<JsonObject>(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull(),
+    startedAt: timestampColumn("started_at"),
+    completedAt: timestampColumn("completed_at")
+  },
+  (table) => [
+    unique("ci_validations_binding_unique").on(table.taskId, table.attemptId, table.reviewId, table.candidateCommit, table.policyDigest, table.requiredChecksDigest),
+    unique("ci_validations_validation_id_unique").on(table.validationId),
+    check("ci_validations_target_ref_check", sql`${table.targetRef} = 'refs/heads/main'`),
+    check("ci_validations_base_commit_check", sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`),
+    check("ci_validations_candidate_commit_check", sql`${table.candidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`),
+    check("ci_validations_candidate_ref_check", sql`${table.candidateRef} ~ '^refs/personal-agent/development-attempts/[0-9a-f-]{36}$'`),
+    check("ci_validations_digest_check", sql`${table.policyDigest} ~ '^[0-9a-f]{64}$' and ${table.authorityCatalogDigest} ~ '^[0-9a-f]{64}$' and ${table.requiredChecksDigest} ~ '^[0-9a-f]{64}$'`),
+    check("ci_validations_status_check", sql`${table.status} in ('pending', 'running', 'succeeded', 'needs_human')`),
+    check("ci_validations_lease_fields_check", sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`),
+    check("ci_validations_lease_generation_check", sql`${table.leaseGeneration} > 0`),
+    check("ci_validations_retry_check", sql`${table.infrastructureRetryCount} between 0 and 1`),
+    check("ci_validations_receipt_check", sql`${table.receipt} is null or jsonb_typeof(${table.receipt}) = 'object'`),
+    check("ci_validations_terminal_fields_check", sql`(${table.status} in ('pending', 'running') and ${table.completedAt} is null and ${table.receipt} is null and ${table.failureClass} is null) or (${table.status} = 'succeeded' and ${table.completedAt} is not null and ${table.receipt} is not null and ${table.failureClass} is null) or (${table.status} = 'needs_human' and ${table.completedAt} is not null and ${table.receipt} is null and ${table.failureClass} is not null)`),
+    check("ci_validations_lease_status_check", sql`(${table.status} = 'running') = (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`),
+    index("ci_validations_claim_idx").on(table.status, table.deadlineAt)
+  ]
+);
+
+export const ciValidationActions = pgTable(
+  "ci_validation_actions",
+  {
+    id: uuid().primaryKey(),
+    validationId: uuid("validation_id").notNull().references(() => ciValidations.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    actionKey: text("action_key").notNull(),
+    kind: text().notNull(),
+    status: text().notNull(),
+    retryClass: text("retry_class").notNull(),
+    sequence: integer().notNull(),
+    safeMetadata: jsonb("safe_metadata").$type<JsonObject>().default(sql`'{}'::jsonb`).notNull(),
+    receipt: jsonb().$type<JsonObject>(),
+    startedAt: timestampColumn("started_at").notNull(),
+    completedAt: timestampColumn("completed_at"),
+    createdAt: timestampColumn("created_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("ci_validation_actions_sequence_unique").on(table.validationId, table.sequence),
+    check("ci_validation_actions_kind_check", sql`${table.kind} in ('publication', 'trigger', 'observation')`),
+    check("ci_validation_actions_status_check", sql`${table.status} in ('started', 'success', 'failed', 'unknown')`),
+    check("ci_validation_actions_retry_class_check", sql`${table.retryClass} in ('retry_safe', 'reconciliation_required', 'no_automatic_retry')`),
+    check("ci_validation_actions_metadata_check", sql`jsonb_typeof(${table.safeMetadata}) = 'object'`),
+    check("ci_validation_actions_receipt_check", sql`${table.receipt} is null or jsonb_typeof(${table.receipt}) = 'object'`),
+    check("ci_validation_actions_completion_check", sql`(${table.status} = 'started' and ${table.completedAt} is null) or (${table.status} <> 'started' and ${table.completedAt} is not null)`),
+    check("ci_validation_actions_sequence_check", sql`${table.sequence} > 0`),
+    index("ci_validation_actions_key_idx").on(table.validationId, table.actionKey, table.sequence)
+  ]
+);
+
+export const developmentReleases = pgTable(
+  "development_releases",
+  {
+    id: uuid().primaryKey(),
+    taskId: uuid("task_id").notNull().references(() => developmentTasks.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    attemptId: uuid("attempt_id").notNull().references(() => developmentAttempts.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    reviewId: uuid("review_id").notNull().references(() => developmentReviews.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    validationId: uuid("validation_id").notNull().references(() => ciValidations.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    policyId: uuid("policy_id").notNull().references(() => phase2dPolicies.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    repositoryId: text("repository_id").notNull(),
+    targetRef: text("target_ref").default("refs/heads/main").notNull(),
+    environmentId: text("environment_id").notNull(),
+    baseCommit: text("base_commit").notNull(),
+    candidateCommit: text("candidate_commit").notNull(),
+    candidateRef: text("candidate_ref").notNull(),
+    policyRevision: text("policy_revision").notNull(),
+    policyDigest: text("policy_digest").notNull(),
+    authorityCatalogDigest: text("authority_catalog_digest").notNull(),
+    requiredChecksDigest: text("required_checks_digest").notNull(),
+    status: text().notNull(),
+    reason: text(),
+    leaseOwner: text("lease_owner"),
+    leaseGeneration: integer("lease_generation").default(1).notNull(),
+    leaseExpiresAt: timestampColumn("lease_expires_at"),
+    reservationOperationId: text("reservation_operation_id").notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull(),
+    updatedAt: timestampColumn("updated_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_releases_task_unique").on(table.taskId),
+    unique("development_releases_reservation_unique").on(table.reservationOperationId),
+    check("development_releases_target_ref_check", sql`${table.targetRef} = 'refs/heads/main'`),
+    check("development_releases_commit_check", sql`${table.baseCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$' and ${table.candidateCommit} ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'`),
+    check("development_releases_candidate_ref_check", sql`${table.candidateRef} ~ '^refs/personal-agent/development-attempts/[0-9a-f-]{36}$'`),
+    check("development_releases_digest_check", sql`${table.policyDigest} ~ '^[0-9a-f]{64}$' and ${table.authorityCatalogDigest} ~ '^[0-9a-f]{64}$' and ${table.requiredChecksDigest} ~ '^[0-9a-f]{64}$'`),
+    check("development_releases_status_check", sql`${table.status} in ('merge_pending', 'merged', 'build_pending', 'deploy_pending', 'verifying', 'deployed', 'needs_human')`),
+    check("development_releases_lease_fields_check", sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`),
+    check("development_releases_lease_generation_check", sql`${table.leaseGeneration} > 0`),
+    index("development_releases_environment_idx").on(table.environmentId, table.status)
+  ]
+);
+
+export const developmentReleaseEvents = pgTable(
+  "development_release_events",
+  {
+    id: uuid().primaryKey(),
+    releaseId: uuid("release_id").notNull().references(() => developmentReleases.id, { onDelete: "restrict", onUpdate: "restrict" }),
+    sequence: integer().notNull(),
+    kind: text().notNull(),
+    status: text().notNull(),
+    retryClass: text("retry_class"),
+    safeMetadata: jsonb("safe_metadata").$type<JsonObject>().default(sql`'{}'::jsonb`).notNull(),
+    createdAt: timestampColumn("created_at").defaultNow().notNull()
+  },
+  (table) => [
+    unique("development_release_events_sequence_unique").on(table.releaseId, table.sequence),
+    check("development_release_events_sequence_check", sql`${table.sequence} > 0`),
+    check("development_release_events_status_check", sql`${table.status} in ('started', 'success', 'failed', 'unknown', 'blocked')`),
+    check("development_release_events_retry_class_check", sql`${table.retryClass} is null or ${table.retryClass} in ('retry_safe', 'reconciliation_required', 'no_automatic_retry')`),
+    check("development_release_events_metadata_check", sql`jsonb_typeof(${table.safeMetadata}) = 'object'`)
+  ]
+);

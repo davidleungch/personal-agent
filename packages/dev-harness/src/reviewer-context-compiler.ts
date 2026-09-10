@@ -24,6 +24,15 @@ export const reviewerAuthorityPaths = [
   "docs/decisions/0001-pi-development-harness.md",
   "docs/phase-2-implementation-plan.md"
 ] as const;
+export const phase2dReviewerAuthorityPaths = [
+  ...reviewerAuthorityPaths,
+  "docs/decisions/0002-phase-2d-v1-merge-deploy.md",
+  "docs/phase-2d-merge-deploy.md"
+] as const;
+const reviewerAuthorityPathsSchema = z.array(workspaceRelativePathSchema)
+  .min(1)
+  .max(16)
+  .refine((paths) => new Set(paths).size === paths.length, "Reviewer authority paths must be unique");
 
 const architectureReferenceSchema = developmentArchitectureReferenceSchema.transform(
   (reference) => {
@@ -108,6 +117,7 @@ export class ReviewerContextCompiler {
 
   async compile(input: {
     acceptanceCriteria: unknown;
+    authorityPaths?: readonly string[];
     baseCommit: string;
     budget: unknown;
     candidateCommit: string;
@@ -126,6 +136,7 @@ export class ReviewerContextCompiler {
     const contextPolicy = developmentReviewerContextPolicySchema.parse(input.contextPolicy);
     const modelProfile = modelProfileSchema.parse(input.modelProfile);
     const { forbiddenPaths, readablePaths } = contextPolicy;
+    const authorityPaths = reviewerAuthorityPathsSchema.parse(input.authorityPaths ?? reviewerAuthorityPaths);
     const changedPaths = await this.git.changedPaths(
       baseCommit,
       candidateCommit,
@@ -161,7 +172,7 @@ export class ReviewerContextCompiler {
     }> = [];
     const authorityReferences: string[] = [];
     let sourceBytes = 0;
-    for (const path of reviewerAuthorityPaths) {
+    for (const path of authorityPaths) {
       const blob = await this.git.readBlob(baseCommit, path);
       const bytes = Buffer.byteLength(blob.content);
       sourceBytes += bytes;

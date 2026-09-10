@@ -4,3 +4,4 @@ export * from "./fix-loop-repositories.js";
 export * from "./repositories.js";
 export * from "./review-repositories.js";
 export * from "./schema.js";
+export * from "./phase2d-repositories.js";

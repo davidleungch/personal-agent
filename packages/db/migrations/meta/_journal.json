@@ -8,6 +8,27 @@
       "when": 1788334829380,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788960557757,
+      "tag": "0001_careful_proteus",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788960933235,
+      "tag": "0002_daily_blur",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788961200000,
+      "tag": "0003_phase2d_gates",
+      "breakpoints": true
     }
   ]
 }

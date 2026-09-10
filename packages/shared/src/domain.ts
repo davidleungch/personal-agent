@@ -379,6 +379,101 @@ export type DevelopmentReviewerContextManifest = z.infer<
   typeof developmentReviewerContextManifestSchema
 >;
 
+export const phase2dValidationStatusSchema = z.enum([
+  "pending",
+  "running",
+  "succeeded",
+  "needs_human"
+]);
+export type Phase2DValidationStatus = z.infer<typeof phase2dValidationStatusSchema>;
+
+export const phase2dReleaseStatusSchema = z.enum([
+  "merge_pending",
+  "merged",
+  "build_pending",
+  "deploy_pending",
+  "verifying",
+  "deployed",
+  "needs_human"
+]);
+export type Phase2DReleaseStatus = z.infer<typeof phase2dReleaseStatusSchema>;
+
+export const phase2dActionStatusSchema = z.enum([
+  "not_started",
+  "started",
+  "success",
+  "failed",
+  "unknown"
+]);
+export type Phase2DActionStatus = z.infer<typeof phase2dActionStatusSchema>;
+
+export const phase2dRetryClassSchema = z.enum([
+  "retry_safe",
+  "reconciliation_required",
+  "no_automatic_retry"
+]);
+export type Phase2DRetryClass = z.infer<typeof phase2dRetryClassSchema>;
+
+export const phase2dCiActionKindSchema = z.enum(["publication", "trigger", "observation"]);
+export type Phase2DCiActionKind = z.infer<typeof phase2dCiActionKindSchema>;
+
+export const phase2dCiGateResultSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  status: z.enum(["passed", "failed", "skipped", "cancelled"]),
+  summary: z.string().trim().min(1).max(2_000)
+}).strict();
+export type Phase2DCiGateResult = z.infer<typeof phase2dCiGateResultSchema>;
+
+export const phase2dCoverageMetricSchema = z.object({
+  covered: z.number().int().nonnegative(),
+  percentage: z.number().finite().min(0).max(100),
+  total: z.number().int().nonnegative()
+}).strict().refine((value) => value.covered <= value.total, "Coverage cannot exceed total");
+
+export const phase2dCoverageSchema = z.object({
+  branches: phase2dCoverageMetricSchema,
+  functions: phase2dCoverageMetricSchema,
+  lines: phase2dCoverageMetricSchema,
+  statements: phase2dCoverageMetricSchema
+}).strict();
+export type Phase2DCoverage = z.infer<typeof phase2dCoverageSchema>;
+
+export const phase2dCiReceiptSchema = z.object({
+  authorityCatalogDigest: sha256DigestSchema,
+  checkoutCommit: gitObjectIdSchema,
+  coverage: phase2dCoverageSchema,
+  gates: z.array(phase2dCiGateResultSchema).min(1).max(128).refine(
+    (gates) => new Set(gates.map((gate) => gate.name)).size === gates.length,
+    "CI gate names must be unique"
+  ),
+  policyDigest: sha256DigestSchema,
+  policyRevision: z.string().trim().min(1).max(500),
+  requiredChecksDigest: sha256DigestSchema,
+  repositoryId: z.string().trim().min(1).max(500),
+  runAttempt: z.number().int().positive(),
+  runId: z.string().trim().min(1).max(500),
+  sourceTreeDigest: sha256DigestSchema,
+  validatedCommit: gitObjectIdSchema,
+  validationId: z.string().trim().min(1).max(500),
+  workflowRevision: z.string().trim().min(1).max(500)
+}).strict();
+export type Phase2DCiReceipt = z.infer<typeof phase2dCiReceiptSchema>;
+
+export const phase2dValidationBindingSchema = z.object({
+  attemptId: z.string().uuid(),
+  baseCommit: gitObjectIdSchema,
+  candidateCommit: gitObjectIdSchema,
+  candidateRef: z.string().regex(/^refs\/personal-agent\/development-attempts\/[0-9a-f-]{36}$/),
+  policyDigest: sha256DigestSchema,
+  policyRevision: z.string().trim().min(1).max(500),
+  repositoryId: z.string().trim().min(1).max(500),
+  requiredChecksDigest: sha256DigestSchema,
+  reviewId: z.string().uuid(),
+  targetRef: z.literal("refs/heads/main"),
+  taskId: z.string().uuid()
+}).strict();
+export type Phase2DValidationBinding = z.infer<typeof phase2dValidationBindingSchema>;
+
 const developmentTaskTransitions: Readonly<
   Record<DevelopmentTaskStatus, readonly DevelopmentTaskStatus[]>
 > = {
